@@ -16,16 +16,18 @@ import (
 var manualTestHTML string
 
 type ModelRequest struct {
-	CandidateID string `json:"candidate_id,omitempty"`
-	Text        string `json:"text"`
-	Context     string `json:"context"`
-	Language    string `json:"language,omitempty"`
+	CandidateID    string `json:"candidate_id,omitempty"`
+	Text           string `json:"text"`
+	Context        string `json:"context"`
+	Language       string `json:"language,omitempty"`
+	CandidateStyle string `json:"candidate_style,omitempty"`
 }
 
 type StartInterviewResponse struct {
 	CandidateID     string         `json:"candidate_id"`
 	DurationSeconds int            `json:"duration_seconds"`
 	FirstQuestion   string         `json:"first_question"`
+	ResponseStyle   string         `json:"response_style,omitempty"`
 	StreamURL       string         `json:"stream_url"`
 	StartedAt       time.Time      `json:"started_at"`
 	Session         map[string]any `json:"session"`
@@ -35,14 +37,22 @@ type EndInterviewResponse struct {
 	CandidateID string         `json:"candidate_id"`
 	Ended       bool           `json:"ended"`
 	Report      map[string]any `json:"report"`
+	ToneSummary map[string]any `json:"tone_summary,omitempty"`
 	Raw         map[string]any `json:"raw,omitempty"`
 }
 
 type StreamMessage struct {
-	Type     string `json:"type"`
-	Text     string `json:"text,omitempty"`
-	State    string `json:"state"`
-	Language string `json:"language,omitempty"`
+	Type           string         `json:"type"`
+	Text           string         `json:"text,omitempty"`
+	State          string         `json:"state,omitempty"`
+	Language       string         `json:"language,omitempty"`
+	Phase          string         `json:"phase,omitempty"`
+	PhaseBefore    string         `json:"phase_before,omitempty"`
+	ResponseStyle  string         `json:"response_style,omitempty"`
+	CandidateStyle string         `json:"candidate_style,omitempty"`
+	Report         map[string]any `json:"report,omitempty"`
+	ToneSummary    map[string]any `json:"tone_summary,omitempty"`
+	EndedReason    string         `json:"ended_reason,omitempty"`
 }
 
 type Server struct {
@@ -52,6 +62,7 @@ type Server struct {
 	states   *StateMachine
 	sessions *SessionStore
 	upgrade  websocket.Upgrader
+	useTurns bool
 }
 
 func NewServer(a *BrainA, b *BrainB, c BrainC, states *StateMachine) *Server {
@@ -61,6 +72,7 @@ func NewServer(a *BrainA, b *BrainB, c BrainC, states *StateMachine) *Server {
 		brainC:   c,
 		states:   states,
 		sessions: NewSessionStore(),
+		useTurns: envBool("USE_INTERVIEW_TURN", true),
 		upgrade: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -95,6 +107,37 @@ func (s *Server) handleInterviews(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session := s.sessions.Start(req)
+	if s.useTurns {
+		if err := s.brainC.LedgerStart(r.Context(), session.CandidateID); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "brain C ledger start failed: " + err.Error()})
+			return
+		}
+		turn, err := s.brainC.InterviewTurn(r.Context(), s.newInterviewTurnRequest(session, "", normalizeLanguage(req.Language)))
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "brain C interview turn failed: " + err.Error()})
+			return
+		}
+		turn.ResponseText = cleanInterviewResponse(turn.ResponseText, session.CandidateName)
+		s.applyInterviewTurn(session, turn)
+		session.AppendAssistant(turn.ResponseText)
+		writeJSON(w, http.StatusCreated, StartInterviewResponse{
+			CandidateID:     session.CandidateID,
+			DurationSeconds: session.DurationSeconds,
+			FirstQuestion:   turn.ResponseText,
+			ResponseStyle:   responseStyleOrDefault(turn.ResponseStyle),
+			StreamURL:       "/ws",
+			StartedAt:       session.InterviewStartedAt,
+			Session: map[string]any{
+				"seniority":       session.Seniority,
+				"job_description": session.JobDescription,
+				"phase":           session.Phase,
+				"language":        session.Language,
+				"response_style":  responseStyleOrDefault(turn.ResponseStyle),
+				"use_turn_api":    true,
+			},
+		})
+		return
+	}
 	if err := s.brainC.LedgerStart(r.Context(), session.CandidateID); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "brain C ledger start failed: " + err.Error()})
 		return
@@ -149,7 +192,7 @@ func (s *Server) handleInterviewByID(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, EndInterviewResponse{CandidateID: candidateID, Ended: true, Report: report, Raw: raw})
+		writeJSON(w, http.StatusOK, EndInterviewResponse{CandidateID: candidateID, Ended: true, Report: report, ToneSummary: session.ToneSummary, Raw: raw})
 	case len(parts) == 2 && parts[1] == "report" && r.Method == http.MethodGet:
 		session, ok := s.sessions.Find(candidateID)
 		if !ok {
@@ -160,7 +203,7 @@ func (s *Server) handleInterviewByID(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusAccepted, map[string]any{"candidate_id": candidateID, "ready": false})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"candidate_id": candidateID, "ready": true, "report": session.Report, "raw": session.ReportRaw})
+		writeJSON(w, http.StatusOK, map[string]any{"candidate_id": candidateID, "ready": true, "report": session.Report, "tone_summary": session.ToneSummary, "raw": session.ReportRaw})
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 	}
@@ -187,6 +230,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTurn(ctx context.Context, conn *websocket.Conn, req ModelRequest) error {
+	if s.useTurns {
+		return s.handleInterviewTurn(ctx, conn, req)
+	}
 	start := time.Now()
 	req.Text = strings.TrimSpace(req.Text)
 	session := s.sessions.Get(req.CandidateID, req.Context)
@@ -231,6 +277,106 @@ func (s *Server) handleTurn(ctx context.Context, conn *websocket.Conn, req Model
 		return err
 	}
 	return s.writeResponse(ctx, conn, response, behavior.Language, session)
+}
+
+func (s *Server) handleInterviewTurn(ctx context.Context, conn *websocket.Conn, req ModelRequest) error {
+	req.Text = strings.TrimSpace(req.Text)
+	session := s.sessions.Get(req.CandidateID, req.Context)
+	if session.Expired(time.Now()) {
+		report, raw, err := s.finalizeInterview(ctx, session)
+		if err != nil {
+			return err
+		}
+		_ = raw
+		if err := conn.WriteJSON(StreamMessage{Type: "report", Report: report, ToneSummary: session.ToneSummary, EndedReason: "timeout"}); err != nil {
+			return err
+		}
+		return conn.WriteJSON(StreamMessage{Type: "end", State: "ended", Language: session.Language, Phase: session.Phase})
+	}
+
+	behavior := s.brainB.Analyze(req.Text, req.Language)
+	if strings.TrimSpace(req.CandidateStyle) != "" {
+		session.LastCandidateStyle = strings.TrimSpace(req.CandidateStyle)
+	}
+	session.AppendUser(req.Text)
+	memories, err := s.brainA.Recall(req.Text+" "+req.Context, 3)
+	if err != nil {
+		return err
+	}
+	session.RollingSummary = summarizeMemories(memories)
+
+	turn, err := s.brainC.InterviewTurn(ctx, s.newInterviewTurnRequest(session, req.Text, behavior.Language))
+	if err != nil {
+		return err
+	}
+	turn.ResponseText = cleanInterviewResponse(turn.ResponseText, session.CandidateName)
+	s.applyInterviewTurn(session, turn)
+	if err := s.brainA.StoreTurnWithLanguage(req.Context+"\n"+req.Text, turn.Language); err != nil {
+		return err
+	}
+	if turn.PhaseChanged && turn.Phase != "" {
+		if err := conn.WriteJSON(StreamMessage{Type: "phase", Phase: turn.Phase, PhaseBefore: turn.PhaseBefore, Language: turn.Language}); err != nil {
+			return err
+		}
+	}
+	if err := s.writeStyledResponse(ctx, conn, turn.ResponseText, turn.Language, turn.ResponseStyle, turn.Phase, session); err != nil {
+		return err
+	}
+	if turn.Safety.Triggered {
+		report, _, err := s.finalizeInterview(ctx, session)
+		if err == nil {
+			_ = conn.WriteJSON(StreamMessage{Type: "report", Report: report, ToneSummary: session.ToneSummary, EndedReason: "safety"})
+		}
+		session.Ended = true
+		return nil
+	}
+	if turn.Phase == "wrap" && turn.Ledger.Ended {
+		report, _, err := s.finalizeInterview(ctx, session)
+		if err == nil {
+			_ = conn.WriteJSON(StreamMessage{Type: "report", Report: report, ToneSummary: session.ToneSummary, EndedReason: "natural"})
+		}
+		session.Ended = true
+	}
+	return nil
+}
+
+func (s *Server) newInterviewTurnRequest(session *CandidateSession, transcript string, languageHint string) InterviewTurnRequest {
+	candidateStyle := strings.TrimSpace(session.LastCandidateStyle)
+	if candidateStyle == "" {
+		candidateStyle = "Default"
+	}
+	return InterviewTurnRequest{
+		CandidateID:    session.CandidateID,
+		Transcript:     transcript,
+		JobDescription: session.JobDescription,
+		Seniority:      session.Seniority,
+		CandidateName:  session.CandidateName,
+		LanguageHint:   normalizeLanguageHint(languageHint),
+		Region:         "IN",
+		CandidateStyle: candidateStyle,
+	}
+}
+
+func (s *Server) applyInterviewTurn(session *CandidateSession, turn InterviewTurnResponse) {
+	if turn.Phase != "" {
+		session.Phase = turn.Phase
+	}
+	if turn.Language != "" {
+		session.Language = turn.Language
+	}
+	if turn.CandidateStyle != "" {
+		session.LastCandidateStyle = turn.CandidateStyle
+	}
+	if turn.ResponseStyle != "" {
+		session.LastResponseStyle = turn.ResponseStyle
+	}
+	if turn.TopicHint != nil {
+		session.LastTopic = turn.TopicHint.Topic
+		session.LastLevel = turn.TopicHint.Level
+	}
+	if turn.Ledger.Ended {
+		session.Ended = true
+	}
 }
 
 func (s *Server) runOrchestratorTurn(ctx context.Context, session *CandidateSession, candidateText string, behavior Behavior) (string, error) {
@@ -332,13 +478,16 @@ func (s *Server) finalizeInterview(ctx context.Context, session *CandidateSessio
 	if session.Report != nil {
 		return session.Report, session.ReportRaw, nil
 	}
-	raw, err := s.brainC.Analyze(ctx, session.TranscriptText())
+	raw, err := s.brainC.Analyze(ctx, session.TranscriptText(), session.CandidateID)
 	if err != nil {
 		return nil, nil, err
 	}
 	report := raw
 	if nested, ok := raw["analysis"].(map[string]any); ok {
 		report = nested
+	}
+	if tone, ok := raw["tone_summary"].(map[string]any); ok {
+		session.ToneSummary = tone
 	}
 	session.Report = report
 	session.ReportRaw = raw
@@ -350,6 +499,23 @@ func (s *Server) finalizeInterview(ctx context.Context, session *CandidateSessio
 }
 
 func (s *Server) writeResponse(ctx context.Context, conn *websocket.Conn, response string, language string, session *CandidateSession) error {
+	return s.writeTokenResponse(ctx, conn, response, language, session)
+}
+
+func (s *Server) writeStyledResponse(ctx context.Context, conn *websocket.Conn, response string, language string, responseStyle string, phase string, session *CandidateSession) error {
+	style := responseStyleOrDefault(responseStyle)
+	if err := conn.WriteJSON(StreamMessage{
+		Type:          "style",
+		ResponseStyle: style,
+		Language:      language,
+		Phase:         phase,
+	}); err != nil {
+		return err
+	}
+	return s.writeTokenResponse(ctx, conn, response, language, session)
+}
+
+func (s *Server) writeTokenResponse(ctx context.Context, conn *websocket.Conn, response string, language string, session *CandidateSession) error {
 	session.AppendAssistant(response)
 	for token := range streamWords(ctx, strings.TrimSpace(response), 5*time.Millisecond) {
 		if err := conn.WriteJSON(StreamMessage{Type: "token", Text: token, State: "speaking", Language: language}); err != nil {
@@ -357,6 +523,43 @@ func (s *Server) writeResponse(ctx context.Context, conn *websocket.Conn, respon
 		}
 	}
 	return conn.WriteJSON(StreamMessage{Type: "end", State: "listening", Language: language})
+}
+
+func responseStyleOrDefault(style string) string {
+	style = strings.TrimSpace(style)
+	if style == "" {
+		return "Friendly"
+	}
+	return style
+}
+
+func cleanInterviewResponse(text, candidateName string) string {
+	cleaned := strings.TrimSpace(text)
+	prefixes := []string{
+		"Okay, here's what I'd say:",
+		"Here's what I'd say:",
+		"Here is what I'd say:",
+		"Okay, here is what I'd say:",
+	}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(strings.ToLower(cleaned), strings.ToLower(prefix)) {
+			cleaned = strings.TrimSpace(cleaned[len(prefix):])
+			break
+		}
+	}
+	name := strings.TrimSpace(candidateName)
+	if name == "" {
+		name = "there"
+	}
+	replacements := map[string]string{
+		"[Candidate Name]": name,
+		"[candidate name]": name,
+		"Candidate Name":   name,
+	}
+	for placeholder, value := range replacements {
+		cleaned = strings.ReplaceAll(cleaned, placeholder, value)
+	}
+	return strings.TrimSpace(cleaned)
 }
 
 func summarizeMemories(memories []Memory) string {
@@ -384,6 +587,19 @@ func normalizeLanguage(language string) string {
 		return "hinglish"
 	default:
 		return "en"
+	}
+}
+
+func normalizeLanguageHint(language string) string {
+	switch strings.ToLower(strings.TrimSpace(language)) {
+	case "hi", "hindi":
+		return "hi"
+	case "hinglish":
+		return "hinglish"
+	case "en", "english":
+		return "en"
+	default:
+		return ""
 	}
 }
 

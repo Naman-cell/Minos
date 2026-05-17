@@ -8,10 +8,11 @@ import (
 )
 
 type ModelRequest struct {
-	CandidateID string `json:"candidate_id,omitempty"`
-	Text        string `json:"text"`
-	Context     string `json:"context"`
-	Language    string `json:"language,omitempty"`
+	CandidateID    string `json:"candidate_id,omitempty"`
+	Text           string `json:"text"`
+	Context        string `json:"context"`
+	Language       string `json:"language,omitempty"`
+	CandidateStyle string `json:"candidate_style,omitempty"`
 }
 
 type ModelClient struct {
@@ -22,14 +23,14 @@ func NewModelClient(url string) *ModelClient {
 	return &ModelClient{url: url}
 }
 
-func (m *ModelClient) Stream(ctx context.Context, candidateID, text, contextBlock, language string) (<-chan StreamMessage, error) {
+func (m *ModelClient) Stream(ctx context.Context, candidateID, text, contextBlock, language, candidateStyle string) (<-chan StreamMessage, error) {
 	out := make(chan StreamMessage)
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, m.url, nil)
 	if err != nil {
 		go mockStream(ctx, out)
 		return out, nil
 	}
-	if err := conn.WriteJSON(ModelRequest{CandidateID: candidateID, Text: text, Context: contextBlock, Language: language}); err != nil {
+	if err := conn.WriteJSON(ModelRequest{CandidateID: candidateID, Text: text, Context: contextBlock, Language: language, CandidateStyle: styleOrDefault(candidateStyle)}); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
@@ -53,7 +54,7 @@ func (m *ModelClient) Stream(ctx context.Context, candidateID, text, contextBloc
 func mockStream(ctx context.Context, out chan<- StreamMessage) {
 	defer close(out)
 	messages := []StreamMessage{
-		{Type: "ack", Text: "That makes sense.", State: "thinking", Language: "en"},
+		{Type: "style", ResponseStyle: "Friendly", Language: "en", Phase: "interview"},
 		{Type: "token", Text: "You", State: "speaking", Language: "en"},
 		{Type: "token", Text: "mentioned", State: "speaking", Language: "en"},
 		{Type: "token", Text: "latency.", State: "speaking", Language: "en"},

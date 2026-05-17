@@ -28,6 +28,7 @@ func decodeMultipartStartRequest(r *http.Request) (StartInterviewRequest, error)
 	duration, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("duration_seconds")))
 	req := StartInterviewRequest{
 		CandidateID:     r.FormValue("candidate_id"),
+		CandidateName:   r.FormValue("candidate_name"),
 		ResumeText:      r.FormValue("resume_text"),
 		JobDescription:  r.FormValue("job_description"),
 		Seniority:       r.FormValue("seniority"),

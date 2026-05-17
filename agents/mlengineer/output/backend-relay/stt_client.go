@@ -63,7 +63,69 @@ func (s *STTClient) Transcribe(ctx context.Context, audio []byte, language strin
 		}
 		return "I led a reliability migration and measured latency before and after.", nil
 	}
-	return s.nativeAudioTextWithBrainC(ctx, audio, language)
+	if s.mode == "native_audio" || s.mode == "native-audio" {
+		return s.nativeAudioTextWithBrainC(ctx, audio, language)
+	}
+	return s.transcribeWithBrainC(ctx, audio, language)
+}
+
+func (s *STTClient) transcribeWithBrainC(ctx context.Context, audio []byte, language string) (string, error) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", s.mediaName)
+	if err != nil {
+		return "", err
+	}
+	if _, err := part.Write(audio); err != nil {
+		return "", err
+	}
+	if language != "" && language != "auto" {
+		if err := writer.WriteField("language", language); err != nil {
+			return "", err
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.brainURL+"/transcribe", &body)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	if s.apiKey != "" {
+		req.Header.Set("X-API-Key", s.apiKey)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("brain C transcribe failed: %s %s", resp.Status, strings.TrimSpace(string(raw)))
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", err
+	}
+	var decoded struct {
+		Text       string `json:"text"`
+		Transcript string `json:"transcript"`
+		Language   string `json:"language"`
+	}
+	transcript := ""
+	if err := json.Unmarshal(raw, &decoded); err == nil {
+		transcript = strings.TrimSpace(decoded.Transcript)
+		if transcript == "" {
+			transcript = strings.TrimSpace(decoded.Text)
+		}
+	} else {
+		transcript = strings.TrimSpace(string(raw))
+	}
+	if transcript == "" {
+		return "", fmt.Errorf("brain C transcribe returned empty transcript")
+	}
+	return transcript, nil
 }
 
 func (s *STTClient) nativeAudioTextWithBrainC(ctx context.Context, audio []byte, language string) (string, error) {

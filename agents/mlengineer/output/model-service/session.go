@@ -14,11 +14,16 @@ type TranscriptTurn struct {
 
 type CandidateSession struct {
 	CandidateID        string
+	CandidateName      string
 	ResumeText         string
 	JobDescription     string
 	Seniority          string
 	DurationSeconds    int
 	Transcript         []TranscriptTurn
+	Phase              string
+	Language           string
+	LastCandidateStyle string
+	LastResponseStyle  string
 	LastQuestion       string
 	LastTopic          string
 	LastLevel          int
@@ -29,6 +34,7 @@ type CandidateSession struct {
 	Ended              bool
 	Report             map[string]any
 	ReportRaw          map[string]any
+	ToneSummary        map[string]any
 }
 
 type SessionStore struct {
@@ -42,6 +48,7 @@ func NewSessionStore() *SessionStore {
 
 type StartInterviewRequest struct {
 	CandidateID     string `json:"candidate_id"`
+	CandidateName   string `json:"candidate_name"`
 	ResumeText      string `json:"resume_text"`
 	JobDescription  string `json:"job_description"`
 	Seniority       string `json:"seniority"`
@@ -65,10 +72,12 @@ func (s *SessionStore) Start(req StartInterviewRequest) *CandidateSession {
 	now := time.Now()
 	session := &CandidateSession{
 		CandidateID:        candidateID,
+		CandidateName:      strings.TrimSpace(req.CandidateName),
 		ResumeText:         req.ResumeText,
 		JobDescription:     req.JobDescription,
 		Seniority:          seniority,
 		DurationSeconds:    duration,
+		Language:           normalizeLanguage(req.Language),
 		LastLevel:          2,
 		InSettlingPhase:    true,
 		SettlingStartedAt:  now,
@@ -98,6 +107,7 @@ func (s *SessionStore) Get(candidateID, context string) *CandidateSession {
 		JobDescription:     context,
 		Seniority:          "mid",
 		DurationSeconds:    7 * 60,
+		Language:           "en",
 		LastLevel:          2,
 		InSettlingPhase:    true,
 		SettlingStartedAt:  now,

@@ -2,7 +2,9 @@
 
 Minos is a local prototype of a streaming **Three-Brain AI Interviewer**.
 
-It runs a browser-based interview page, records candidate answers, sends audio to a relay for transcription, passes the transcript through a local interview orchestrator, calls a remote Brain C model for generation/evaluation, and streams the interviewer response back to the browser.
+It runs a browser-based interview page, records candidate answers, sends audio to a relay for transcription, passes the transcript through a local interview orchestrator, calls remote Brain C `/interview/turn`, and streams the interviewer response back to the browser.
+
+The orchestrator now sends text plus speaking style only. The frontend owns any TTS; this repo's manual page only displays the streamed response.
 
 ## What You Can Run Locally
 
@@ -49,8 +51,10 @@ cd agents/mlengineer/output/model-service
 
 MODEL_ADDR=:18080 \
 BRAIN_C_MODE=remote \
+USE_INTERVIEW_TURN=true \
 CONTEXT_DB=/private/tmp/ai-interviewer-manual.db \
-go run .
+BRAIN_C_URL=https://your-brain-c-ngrok-url.ngrok-free.app \
+go run -ldflags="-linkmode=external" .
 ```
 
 Expected output:
@@ -60,10 +64,10 @@ brain C mode=remote
 model service listening on :18080
 ```
 
-If your Brain C ngrok URL changed, include it:
+If your Brain C ngrok URL changes, update `BRAIN_C_URL` in the command.
 
 ```bash
-BRAIN_C_URL=https://your-current-ngrok-url.ngrok-free.app
+BRAIN_C_URL=https://your-brain-c-ngrok-url.ngrok-free.app
 ```
 
 ### 2. Start The Backend Relay
@@ -77,7 +81,7 @@ RELAY_ADDR=:3002 \
 MODEL_WS_URL=ws://localhost:18080/ws \
 STT_MODE=brainc \
 BRAIN_C_URL=https://your-brain-c-ngrok-url.ngrok-free.app \
-go run .
+go run -ldflags="-linkmode=external" .
 ```
 
 Expected output:
@@ -121,14 +125,14 @@ Terminal 1:
 
 ```bash
 cd agents/mlengineer/output/model-service
-MODEL_ADDR=:18080 BRAIN_C_MODE=mock go run .
+MODEL_ADDR=:18080 BRAIN_C_MODE=mock USE_INTERVIEW_TURN=true go run -ldflags="-linkmode=external" .
 ```
 
 Terminal 2:
 
 ```bash
 cd agents/mlengineer/output/backend-relay
-RELAY_ADDR=:3002 MODEL_WS_URL=ws://localhost:18080/ws STT_MODE=mock go run .
+RELAY_ADDR=:3002 MODEL_WS_URL=ws://localhost:18080/ws STT_MODE=mock go run -ldflags="-linkmode=external" .
 ```
 
 Then open:
@@ -172,7 +176,7 @@ ws://localhost:3000/ws
 To use a different Brain C URL:
 
 ```bash
-BRAIN_C_URL=https://your-current-ngrok-url.ngrok-free.app docker compose up --build
+BRAIN_C_URL=https://your-brain-c-ngrok-url.ngrok-free.app docker compose up --build
 ```
 
 To stop everything:
@@ -209,7 +213,7 @@ File:
 agents/mlengineer/output/model-service/manual_test.html
 ```
 
-The browser page is the local test client. It lets you start an interview, upload a resume, record microphone audio, connect to the relay over WebSocket, receive streamed interviewer text, and speak responses using the browser's built-in `speechSynthesis`.
+The browser page is the local test client. It lets you start an interview, upload a resume, record microphone audio, connect to the relay over WebSocket, and receive streamed interviewer text. It does not synthesize interviewer speech.
 
 ### Backend Relay
 
@@ -226,7 +230,7 @@ It exposes:
 - `WS /ws` for the reliable fallback flow.
 - `GET /offer`, `POST /answer`, and `POST /ice-candidate` for WebRTC signalling experiments.
 
-In the reliable local path, the relay receives a browser `MediaRecorder` WebM clip, sends it to Brain C `/native-audio-chat` for speech-to-text, then forwards the transcript to the model service WebSocket.
+In the reliable local path, the relay receives a browser `MediaRecorder` WebM clip, emits an optional `filler` thinking cue, sends the clip to Brain C `/transcribe` for speech-to-text, detects or defaults `candidate_style`, then forwards the transcript and style to the model service WebSocket. Do not use `/native-audio-chat` for production interviews; that endpoint can produce multimodal audio-agent replies instead of transcript text.
 
 Important environment variables:
 
@@ -234,7 +238,7 @@ Important environment variables:
 |---|---|---|
 | `RELAY_ADDR` | `:3002` | Port/address for the relay. |
 | `MODEL_WS_URL` | `ws://localhost:18080/ws` | Model service WebSocket URL. |
-| `STT_MODE` | `brainc` or `mock` | Whether to use Brain C transcription or local mock text. |
+| `STT_MODE` | `brainc`, `mock`, or `native_audio` | `brainc` uses `/transcribe`; `mock` bypasses STT; `native_audio` is legacy and not for production interviews. |
 | `BRAIN_C_URL` | `https://...ngrok-free.app` | Remote Brain C server URL. |
 | `BRAIN_C_API_KEY` | empty or key | Optional API key sent to Brain C. |
 
@@ -255,9 +259,10 @@ It owns:
 - resume text extraction for `.pdf` and `.docx`
 - local memory storage in SQLite
 - Brain A recall
-- Brain B behavior analysis and fast acknowledgements
-- Brain C prompt wrapping, scoring, next-question selection, and final report calls
-- streaming `ack`, `token`, and `end` messages back over WebSocket
+- Brain B lightweight routing, language hints, and error handling
+- Brain C `/interview/turn` calls for greeting, phase routing, language matching, softeners, safety, ledger updates, and next interviewer response
+- streaming `style`, optional `filler`, optional `phase`/`report`, `token`, and `end` messages back over WebSocket
+- final report storage, including `tone_summary` when Brain C returns it
 
 Important endpoints:
 
@@ -280,14 +285,15 @@ Important environment variables:
 | `BRAIN_C_MODE` | `remote` or `mock` | Whether to call remote Brain C or use local mock behavior. |
 | `BRAIN_C_URL` | `https://...ngrok-free.app` | Remote Brain C server URL. |
 | `BRAIN_C_API_KEY` | empty or key | Optional API key sent to Brain C. |
+| `USE_INTERVIEW_TURN` | `true` | Uses Brain C's single-call interview API. Set `false` only for legacy fallback testing. |
 
 ### Brain A, Brain B, And Brain C
 
 Brain A is local memory. It stores and recalls earlier candidate turns from SQLite so later prompts can include useful context.
 
-Brain B is local behavior logic. It detects simple conversational states such as normal answers, rephrase requests, language choice, and safety-sensitive content. It also provides quick acknowledgements before the slower Brain C response arrives.
+Brain B is local lightweight behavior logic. In the current path it supplies language hints and transport guardrails, but it does not generate candidate-visible acknowledgements or interview strategy.
 
-Brain C is the remote trained model service. The local orchestrator calls it for interview question generation, answer evaluation, topic ledger updates, softeners, native audio transcription, and final analysis.
+Brain C is the remote trained model service. The local orchestrator calls `/interview/turn` once per transcript; Brain C owns phase routing, answer classification, safety templates, softeners, ledger updates, language matching, and the response text.
 
 ## Request Flow
 
@@ -298,13 +304,14 @@ The normal manual interview flow is:
 3. Model service creates a candidate session and asks Brain C for the first question.
 4. Browser records the candidate answer as WebM audio.
 5. Browser sends the audio to backend relay `WS /ws`.
-6. Backend relay sends the audio to Brain C `/native-audio-chat` for transcription.
-7. Backend relay sends the transcript to model service `WS /ws`.
-8. Model service sends a fast Brain B acknowledgement.
-9. Model service asks Brain C to evaluate the answer and generate the next question.
-10. Model service streams tokens back to the relay.
-11. Relay streams them back to the browser.
-12. Browser displays and speaks the interviewer response.
+6. Backend relay sends the audio to Brain C `/transcribe` for transcription.
+7. Relay may send a local `filler` frame while transcription runs.
+8. Backend relay sends the transcript to model service `WS /ws`.
+9. Model service sends one `/interview/turn` request to Brain C with `candidate_style`.
+10. Brain C returns warm `response_text`, `response_style`, phase, language, safety, and ledger state.
+11. Model service sends a `style` frame, then response tokens, back to the relay.
+12. Relay streams them back to the browser.
+13. Browser displays the text. The product frontend can synthesize speech from the same stream.
 
 ## Common Problems
 
@@ -313,13 +320,13 @@ The normal manual interview flow is:
 If `:18080` is busy, start the model service on another port:
 
 ```bash
-MODEL_ADDR=:18081 BRAIN_C_MODE=remote go run .
+MODEL_ADDR=:18081 BRAIN_C_MODE=remote USE_INTERVIEW_TURN=true go run -ldflags="-linkmode=external" .
 ```
 
 Then start the relay with the matching model URL:
 
 ```bash
-RELAY_ADDR=:3003 MODEL_WS_URL=ws://localhost:18081/ws STT_MODE=brainc go run .
+RELAY_ADDR=:3003 MODEL_WS_URL=ws://localhost:18081/ws STT_MODE=brainc go run -ldflags="-linkmode=external" .
 ```
 
 Open:
@@ -345,7 +352,7 @@ curl https://your-brain-c-ngrok-url.ngrok-free.app/health
 If the ngrok URL changed, run both services with the new URL:
 
 ```bash
-BRAIN_C_URL=https://new-url.ngrok-free.app
+BRAIN_C_URL=https://your-brain-c-ngrok-url.ngrok-free.app
 ```
 
 ### Browser Records But No Response Returns
@@ -356,12 +363,54 @@ Check these items:
 - the page uses the correct relay WebSocket URL
 - the model service is running
 - `MODEL_WS_URL` points to the model service `/ws`
-- Brain C supports `/native-audio-chat`
+- Brain C supports `/transcribe`
 - the first native audio request may be slow while Brain C loads its audio model
 
-### Browser Does Not Speak
+### Browser Shows Text But Does Not Speak
 
-Check browser audio permission, microphone permission, and system volume. Local speech output uses browser `speechSynthesis`; there is no separate local TTS service.
+That is expected for this repo's manual page. The local services only forward text/style frames; the product frontend owns speech/TTS.
+
+### macOS `missing LC_UUID load command`
+
+On newer macOS versions, older Go toolchains can build temporary `go run` binaries that macOS rejects with:
+
+```text
+dyld: missing LC_UUID load command
+signal: abort trap
+```
+
+Best fix: install Go 1.24 or newer.
+
+Quick workaround: run both services with Go's external linker.
+
+Model service:
+
+```bash
+cd agents/mlengineer/output/model-service
+MODEL_ADDR=:18080 \
+BRAIN_C_MODE=remote \
+USE_INTERVIEW_TURN=true \
+CONTEXT_DB=/private/tmp/ai-interviewer-manual.db \
+BRAIN_C_URL=https://your-brain-c-ngrok-url.ngrok-free.app \
+go run -ldflags=-linkmode=external .
+```
+
+Backend relay:
+
+```bash
+cd agents/mlengineer/output/backend-relay
+RELAY_ADDR=:3002 \
+MODEL_WS_URL=ws://localhost:18080/ws \
+STT_MODE=brainc \
+BRAIN_C_URL=https://your-brain-c-ngrok-url.ngrok-free.app \
+go run -ldflags=-linkmode=external .
+```
+
+If external linking fails because `clang` is missing, install Apple's command line tools:
+
+```bash
+xcode-select --install
+```
 
 ## Project Layout
 
@@ -386,5 +435,5 @@ Check browser audio permission, microphone permission, and system volume. Local 
 - The reliable local path is the manual WebSocket flow using `MediaRecorder` WebM audio.
 - The full WebRTC media-track path is experimental.
 - Brain C must be running separately for remote mode.
-- Local browser speech is test-quality TTS.
+- The bundled manual page is text-only; production speech/TTS belongs in the frontend.
 - The relay has a mock fallback if the model WebSocket cannot be reached, so check service logs when behavior looks unexpectedly mocked.

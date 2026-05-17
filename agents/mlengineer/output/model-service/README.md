@@ -1,64 +1,55 @@
 # Model Service
 
-Go WebSocket orchestrator on port `8080` for the streaming Three-Brain AI Interviewer.
+Go WebSocket orchestrator for the streaming Three-Brain AI Interviewer.
 
-This service keeps Brain A and Brain B local in Go, owns candidate session state, wraps candidate turns into Brain C's trained task shapes, calls the remote Brain C server, parses replies, and streams `ack -> token -> end` back to the relay.
+The current production path uses Brain C's single-call interview API:
+
+```http
+POST /interview/turn
+```
+
+Brain A and Brain B stay local in Go. Brain C owns greeting, phase routing, classification, language matching, softeners, safety templates, ledger updates, and response text.
 
 ## Run
 
-Production remote Brain C mode:
-
 ```bash
 BRAIN_C_MODE=remote \
-BRAIN_C_API_KEY= \
+USE_INTERVIEW_TURN=true \
+BRAIN_C_URL=https://your-brain-c-ngrok-url.ngrok-free.app \
+CONTEXT_DB=/private/tmp/ai-interviewer-context.db \
 MODEL_ADDR=:8080 \
-go run .
+go run -ldflags="-linkmode=external" .
 ```
 
-Local contract testing:
+Mock mode:
 
 ```bash
-BRAIN_C_MODE=mock MODEL_ADDR=:18082 go run .
+BRAIN_C_MODE=mock USE_INTERVIEW_TURN=true MODEL_ADDR=:18082 go run -ldflags="-linkmode=external" .
 ```
-
-The service defaults to Brain C at `https://your-brain-c-ngrok-url.ngrok-free.app`. Override `BRAIN_C_URL` only when the ngrok endpoint changes. The service fails fast in remote mode when Brain C `/health` is unreachable.
 
 ## Brain C Contract
 
-The orchestrator never sends raw candidate fragments directly to Brain C chat. It uses:
+The first interview call sends an empty transcript:
 
-- `WrapGenerate(topic, level, tags)` -> `Generate a {level}-level interview question about: {topic}.`
-- `WrapEvaluate(question, answer)` -> `Evaluate this candidate answer...`
-- `WrapRephrase(question)` -> `Rephrase the following interview question...`
-- `WrapAnalysis(transcript)` or `POST /analyze`
-
-Remote chat uses:
-
-```http
-POST /v1/chat/completions
+```json
+{
+  "candidate_id": "candidate-001",
+  "transcript": "",
+  "job_description": "Senior backend role",
+  "seniority": "senior",
+  "language_hint": "en",
+  "region": "IN",
+  "candidate_style": "Default"
+}
 ```
 
-with `model: "customllm"` and OpenAI-style `messages`. Replies are parsed for `<filler>`, `<response>`, and `Score: X/10`.
+Every candidate turn sends the transcribed answer to the same endpoint. The orchestrator streams `response_text` to the client and stores `phase`, `language`, `candidate_style`, `response_style`, safety state, and final report state locally. `candidate_style` is `"Default"` until a real prosody detector is configured upstream.
 
-Helper endpoints used by the orchestrator:
-
-- `GET /health`
-- `POST /ledger`
-- `GET /ledger/{candidate_id}/next`
-- `POST /ledger/{candidate_id}/record`
-- `POST /ledger/{candidate_id}/end`
-- `POST /softeners/pick`
-- `POST /analyze`
-- `POST /native-audio-chat` when relay audio is routed to Brain C native audio
+Legacy `/v1/chat/completions`, `/softeners/pick`, `/ledger/{id}/record`, and `/ledger/{id}/next` are kept only for `USE_INTERVIEW_TURN=false` fallback testing.
 
 ## Interview Lifecycle
 
-Start a default 7 minute interview with a resume file:
-
-```http
-POST /interviews
-Content-Type: multipart/form-data
-```
+Start an interview:
 
 ```bash
 curl -X POST http://localhost:8080/interviews \
@@ -70,63 +61,30 @@ curl -X POST http://localhost:8080/interviews \
   -F "language=en"
 ```
 
-Supported resume file types are `.pdf` and `.docx`. Text-only `resume_text` JSON remains available for tests, but file upload is the production path.
-
-The service extracts resume text, creates/resets the Brain C ledger, stores resume/JD in Brain A session state, generates the first Brain C question, and returns:
-
-```json
-{
-  "candidate_id": "candidate-001",
-  "duration_seconds": 420,
-  "first_question": "...",
-  "stream_url": "/ws"
-}
-```
-
-During the interview, send candidate turns over `/ws` with the same `candidate_id`.
-
-End and store the final Brain C report:
-
-```http
-POST /interviews/candidate-001/end
-```
-
-Fetch the stored report:
-
-```http
-GET /interviews/candidate-001/report
-```
-
-## WebSocket Input
-
-```json
-{
-  "candidate_id": "candidate-001",
-  "text": "I used Redis with a 5 minute TTL.",
-  "context": "Senior backend role requiring API reliability.",
-  "language": "auto|en|hi|hinglish"
-}
-```
+The response keeps the existing `first_question` field for browser compatibility, but the value is now Brain C's rapport/greeting response from `/interview/turn`.
 
 ## WebSocket Output
 
 ```json
-{ "type": "ack", "text": "...", "state": "thinking" }
-{ "type": "token", "text": "...", "state": "speaking" }
-{ "type": "end", "state": "listening" }
+{ "type": "style", "response_style": "Friendly", "language": "en", "phase": "interview" }
+{ "type": "token", "text": "...", "state": "speaking", "language": "en" }
+{ "type": "end", "state": "listening", "language": "en" }
 ```
 
-## Test Client
+The service only emits text/style data. Product TTS belongs in the frontend; the bundled manual page displays the streamed text without speaking it.
 
-```bash
-go run test_client.go
-go run test_client.go -text "Maine cache lagaya tha kyunki database queries slow ho rahi thi."
-go run test_client.go -text "Deployment ke baad rollback plan ready tha, but metrics initially unstable the."
-go run test_client.go -text "ye maine nhi soccha h abhi tkk."
+Optional frames:
+
+```json
+{ "type": "filler", "text": "Hmm, interesting, let me think about that.", "state": "thinking" }
+{ "type": "phase", "phase": "interview", "phase_before": "consent_check" }
+{ "type": "report", "ended_reason": "natural", "report": {}, "tone_summary": {} }
 ```
+
+The relay owns `filler` frames while STT is running. They are not sent to the model service or Brain C.
 
 ## Tests
 
 ```bash
-GOCACHE=/private/tmp/go-build go test ./...
+go test ./...
 ```

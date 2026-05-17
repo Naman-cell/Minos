@@ -12,6 +12,8 @@ services:
       BRAIN_C_TIMEOUT_SECONDS: "${BRAIN_C_TIMEOUT_SECONDS:-60}"
       BRAIN_C_MAX_TOKENS: "${BRAIN_C_MAX_TOKENS:-320}"
       BRAIN_C_TEMPERATURE: "${BRAIN_C_TEMPERATURE:-0.6}"
+      BRAIN_C_TOP_P: "${BRAIN_C_TOP_P:-0.9}"
+      USE_INTERVIEW_TURN: "${USE_INTERVIEW_TURN:-true}"
     ports:
       - "8080:8080"
     healthcheck:

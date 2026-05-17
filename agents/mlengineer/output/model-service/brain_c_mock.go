@@ -43,9 +43,83 @@ func (b *MockBrainC) Chat(ctx context.Context, messages []ChatMessage, opts Chat
 	}
 }
 
+func (b *MockBrainC) InterviewTurn(ctx context.Context, req InterviewTurnRequest) (InterviewTurnResponse, error) {
+	language := detectLanguage(req.Transcript, req.LanguageHint)
+	if req.Transcript == "" {
+		language = normalizeLanguage(req.LanguageHint)
+	}
+	if language == "" {
+		language = "en"
+	}
+	category := "substantive"
+	if strings.TrimSpace(req.Transcript) == "" {
+		category = "empty"
+	}
+	candidateStyle := strings.TrimSpace(req.CandidateStyle)
+	if candidateStyle == "" {
+		candidateStyle = "Default"
+	}
+	responseStyle := "Friendly"
+	phase := "interview"
+	response := localized(language,
+		"Thanks for joining. Before we get technical, how is your day going?",
+		"Shamil hone ke liye dhanyavaad. Technical baaton se pehle, aapka din kaisa chal raha hai?",
+		"Thanks for joining. Technical baaton se pehle, aapka day kaisa chal raha hai?",
+	)
+	if req.Transcript != "" {
+		response = localized(language,
+			"That context helps. What tradeoff did you make, and which metric told you it worked?",
+			"Yeh context helpful hai. Aapne kaunsa tradeoff liya, aur kis metric se pata chala ki woh kaam kar raha tha?",
+			"Yeh context helpful hai. Kaunsa tradeoff liya tha, aur kaunsi metric se pata chala ki it worked?",
+		)
+	}
+	if containsSelfHarmSignal(strings.ToLower(req.Transcript)) {
+		category = "crisis"
+		phase = "wrap"
+		responseStyle = "Hopeful"
+		response = localized(language,
+			"Let's pause the interview. Your safety matters more than this conversation. Please contact emergency services or someone you trust right now.",
+			"Interview yahin pause karte hain. Aapki safety is conversation se zyada important hai. Please abhi emergency services ya kisi trusted person se contact karein.",
+			"Interview yahin pause karte hain. Your safety is more important than this conversation. Please abhi emergency services ya kisi trusted person se contact karein.",
+		)
+	}
+	return InterviewTurnResponse{
+		ResponseText:     response,
+		Language:         language,
+		Phase:            phase,
+		PhaseBefore:      phase,
+		TurnCountInPhase: 1,
+		Classification: Classification{
+			Category:   category,
+			Language:   language,
+			Confidence: 1,
+		},
+		CandidateStyle: candidateStyle,
+		ResponseStyle:  responseStyle,
+		Safety: SafetyPayload{
+			Triggered:         category == "crisis",
+			Severity:          mapBool(category == "crisis", "critical", ""),
+			Category:          mapBool(category == "crisis", "suicide", ""),
+			RecommendedAction: mapBool(category == "crisis", "end_interview_immediately", ""),
+		},
+		Ledger: LedgerSummary{
+			CandidateID: req.CandidateID,
+			Ended:       category == "crisis",
+			Phase:       phase,
+		},
+	}, nil
+}
+
 func (b *MockBrainC) LedgerStart(ctx context.Context, candidateID string) error {
 	b.ledgerCalls = 0
 	return nil
+}
+
+func mapBool(ok bool, yes, no string) string {
+	if ok {
+		return yes
+	}
+	return no
 }
 
 func (b *MockBrainC) LedgerNext(ctx context.Context, candidateID string) (LedgerNext, error) {
@@ -78,11 +152,16 @@ func (b *MockBrainC) Softener(ctx context.Context, category, language string) (s
 	}
 }
 
-func (b *MockBrainC) Analyze(ctx context.Context, transcript string) (map[string]any, error) {
+func (b *MockBrainC) Analyze(ctx context.Context, transcript, candidateID string) (map[string]any, error) {
 	return map[string]any{
 		"analysis": map[string]any{
 			"recommendation": "Maybe",
 			"confidence":     "Medium",
+		},
+		"tone_summary": map[string]any{
+			"turn_count":              2,
+			"dominant_candidate_mood": "Default",
+			"trajectory":              "Default -> Friendly",
 		},
 	}, nil
 }

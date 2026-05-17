@@ -73,6 +73,23 @@ func (b *RemoteBrainC) Chat(ctx context.Context, messages []ChatMessage, opts Ch
 	return decoded.Choices[0].Message.Content, nil
 }
 
+func (b *RemoteBrainC) InterviewTurn(ctx context.Context, req InterviewTurnRequest) (InterviewTurnResponse, error) {
+	if req.MaxTokens == 0 {
+		req.MaxTokens = b.cfg.MaxTokens
+	}
+	if req.Temperature == 0 {
+		req.Temperature = b.cfg.Temperature
+	}
+	if req.TopP == 0 {
+		req.TopP = b.cfg.TopP
+	}
+	var decoded InterviewTurnResponse
+	if err := b.doJSON(ctx, http.MethodPost, "/interview/turn", req, &decoded); err != nil {
+		return InterviewTurnResponse{}, err
+	}
+	return decoded, nil
+}
+
 func (b *RemoteBrainC) LedgerStart(ctx context.Context, candidateID string) error {
 	payload := map[string]any{"candidate_id": candidateID}
 	var decoded map[string]any
@@ -115,8 +132,11 @@ func (b *RemoteBrainC) Softener(ctx context.Context, category, language string) 
 	return decoded.Phrase, nil
 }
 
-func (b *RemoteBrainC) Analyze(ctx context.Context, transcript string) (map[string]any, error) {
+func (b *RemoteBrainC) Analyze(ctx context.Context, transcript, candidateID string) (map[string]any, error) {
 	payload := map[string]any{"transcript": transcript}
+	if strings.TrimSpace(candidateID) != "" {
+		payload["candidate_id"] = candidateID
+	}
 	var decoded map[string]any
 	if err := b.doJSON(ctx, http.MethodPost, "/analyze", payload, &decoded); err != nil {
 		return nil, err

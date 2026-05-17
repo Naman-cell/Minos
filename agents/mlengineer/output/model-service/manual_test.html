@@ -23,8 +23,11 @@
     <label>Candidate ID
       <input id="candidateId" value="manual_001" />
     </label>
+    <label>Candidate Name
+      <input id="candidateName" placeholder="Optional, e.g. candidate's first name" />
+    </label>
     <label>Relay WebSocket URL
-      <input id="relayUrl" value="ws://localhost:3001/ws" />
+      <input id="relayUrl" value="ws://localhost:3003/ws" />
     </label>
     <label>Language
       <select id="language">
@@ -65,6 +68,9 @@
   </p>
 
   <div class="status" id="status">Idle</div>
+  <label>Latest interviewer response
+    <textarea id="latestResponse" readonly></textarea>
+  </label>
   <pre id="log"></pre>
 
   <script>
@@ -73,45 +79,12 @@
     let recorder = null;
     let chunks = [];
     let assistantBuffer = "";
-    let speechQueue = [];
-    let speaking = false;
+    let currentStyle = "Friendly";
+    let currentLanguage = "en";
 
     function resetSpeech() {
       assistantBuffer = "";
-      speechQueue = [];
-      speaking = false;
-      if ("speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
-      }
-    }
-
-    function speakSentenceQueue() {
-      if (!("speechSynthesis" in window)) return;
-      if (speaking || speechQueue.length === 0) return;
-      speaking = true;
-      const utterance = new SpeechSynthesisUtterance(speechQueue.shift());
-      utterance.onend = () => {
-        speaking = false;
-        speakSentenceQueue();
-      };
-      utterance.onerror = () => {
-        speaking = false;
-        speakSentenceQueue();
-      };
-      window.speechSynthesis.speak(utterance);
-    }
-
-    function queueSentences(text) {
-      const cleaned = (text || "").trim();
-      if (!cleaned) return;
-      const matches = cleaned.match(/[^.!?]+[.!?]+(?:\s+|$)|[^.!?]+$/g) || [];
-      for (const sentence of matches) {
-        const value = sentence.trim();
-        if (value) {
-          speechQueue.push(value);
-        }
-      }
-      speakSentenceQueue();
+      $("latestResponse").value = "";
     }
 
     function log(line, value) {
@@ -127,6 +100,10 @@
     $("startInterview").onclick = async () => {
       const form = new FormData();
       form.append("candidate_id", $("candidateId").value.trim());
+      const candidateName = $("candidateName").value.trim();
+      if (candidateName) {
+        form.append("candidate_name", candidateName);
+      }
       form.append("job_description", $("jobDescription").value);
       form.append("seniority", $("seniority").value);
       form.append("duration_seconds", $("duration").value);
@@ -145,7 +122,9 @@
       setStatus("Interview started");
       log("FIRST_QUESTION", json);
       resetSpeech();
-      queueSentences(json.first_question || "");
+      currentStyle = json.response_style || "Friendly";
+      currentLanguage = (json.session && json.session.language) || $("language").value || "en";
+      $("latestResponse").value = json.first_question || "";
     };
 
     $("connectRelay").onclick = () => {
@@ -159,24 +138,33 @@
       ws.onmessage = (event) => {
         const msg = JSON.parse(event.data);
         log("WS", msg);
+        if (msg.type === "filler" && msg.text) {
+          setStatus("Thinking...");
+          currentStyle = "Friendly";
+          return;
+        }
         if (msg.type === "ack") {
           resetSpeech();
           return;
         }
+        if (msg.type === "style") {
+          currentStyle = msg.response_style || "Friendly";
+          currentLanguage = msg.language || currentLanguage || "en";
+          assistantBuffer = "";
+          setStatus(`Speaking style: ${currentStyle}`);
+          return;
+        }
+        if (msg.type === "error") {
+          setStatus("Relay/model error");
+          return;
+        }
         if (msg.type === "token" && msg.text) {
           assistantBuffer += (assistantBuffer ? " " : "") + msg.text;
-          const sentences = assistantBuffer.match(/[^.!?]+[.!?]+(?:\s+|$)/g) || [];
-          if (sentences.length > 0) {
-            for (const sentence of sentences) {
-              queueSentences(sentence);
-            }
-            assistantBuffer = assistantBuffer.replace(/[^.!?]+[.!?]+(?:\s+|$)/g, "");
-          }
           return;
         }
         if (msg.type === "end") {
           setStatus("Listening");
-          queueSentences(assistantBuffer);
+          $("latestResponse").value = assistantBuffer;
           assistantBuffer = "";
         }
       };

@@ -12,17 +12,21 @@ import (
 )
 
 type clientModelRequest struct {
-	CandidateID string `json:"candidate_id,omitempty"`
-	Text        string `json:"text"`
-	Context     string `json:"context"`
-	Language    string `json:"language,omitempty"`
+	CandidateID    string `json:"candidate_id,omitempty"`
+	Text           string `json:"text"`
+	Context        string `json:"context"`
+	Language       string `json:"language,omitempty"`
+	CandidateStyle string `json:"candidate_style,omitempty"`
 }
 
 type clientStreamMessage struct {
-	Type     string `json:"type"`
-	Text     string `json:"text,omitempty"`
-	State    string `json:"state"`
-	Language string `json:"language,omitempty"`
+	Type          string `json:"type"`
+	Text          string `json:"text,omitempty"`
+	State         string `json:"state"`
+	Language      string `json:"language,omitempty"`
+	Phase         string `json:"phase,omitempty"`
+	PhaseBefore   string `json:"phase_before,omitempty"`
+	ResponseStyle string `json:"response_style,omitempty"`
 }
 
 func main() {
@@ -30,6 +34,7 @@ func main() {
 	text := flag.String("text", "I led a reliability migration and measured latency before and after.", "candidate transcript")
 	candidateID := flag.String("candidate-id", "test_001", "candidate session id")
 	language := flag.String("language", "auto", "language preference: auto, en, hi, hinglish")
+	candidateStyle := flag.String("candidate-style", "Default", "candidate speaking style")
 	flag.Parse()
 
 	conn, resp, err := websocket.DefaultDialer.Dial(*addr, nil)
@@ -42,7 +47,7 @@ func main() {
 	defer conn.Close()
 
 	start := time.Now()
-	if err := conn.WriteJSON(clientModelRequest{CandidateID: *candidateID, Text: *text, Context: "Senior backend role requiring distributed systems and incident response.", Language: *language}); err != nil {
+	if err := conn.WriteJSON(clientModelRequest{CandidateID: *candidateID, Text: *text, Context: "Senior backend role requiring distributed systems and incident response.", Language: *language, CandidateStyle: *candidateStyle}); err != nil {
 		log.Fatal(err)
 	}
 	for {
@@ -50,8 +55,14 @@ func main() {
 		if err := conn.ReadJSON(&msg); err != nil {
 			log.Fatal(err)
 		}
-		if msg.Type == "ack" {
+		if msg.Type == "filler" {
+			fmt.Printf("filler in %dms [%s]: %s\n", time.Since(start).Milliseconds(), msg.Language, msg.Text)
+		} else if msg.Type == "ack" {
 			fmt.Printf("ack in %dms [%s]: %s\n", time.Since(start).Milliseconds(), msg.Language, msg.Text)
+		} else if msg.Type == "phase" {
+			fmt.Printf("\nphase: %s <- %s\n", msg.Phase, msg.PhaseBefore)
+		} else if msg.Type == "style" {
+			fmt.Printf("\nstyle: %s [%s %s]\n", msg.ResponseStyle, msg.Language, msg.Phase)
 		} else if msg.Type == "token" {
 			fmt.Printf("%s ", msg.Text)
 		} else if msg.Type == "end" {

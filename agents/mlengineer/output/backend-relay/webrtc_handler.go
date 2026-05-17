@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -12,35 +13,45 @@ import (
 )
 
 type BrowserMessage struct {
-	Type        string `json:"type"`
-	Data        string `json:"data,omitempty"`
-	Text        string `json:"text,omitempty"`
-	CandidateID string `json:"candidate_id,omitempty"`
-	Language    string `json:"language,omitempty"`
+	Type           string `json:"type"`
+	Data           string `json:"data,omitempty"`
+	Text           string `json:"text,omitempty"`
+	CandidateID    string `json:"candidate_id,omitempty"`
+	Language       string `json:"language,omitempty"`
+	CandidateStyle string `json:"candidate_style,omitempty"`
 }
 
 type StreamMessage struct {
-	Type     string `json:"type"`
-	Text     string `json:"text,omitempty"`
-	State    string `json:"state"`
-	Language string `json:"language,omitempty"`
+	Type           string         `json:"type"`
+	Text           string         `json:"text,omitempty"`
+	State          string         `json:"state,omitempty"`
+	Language       string         `json:"language,omitempty"`
+	Phase          string         `json:"phase,omitempty"`
+	PhaseBefore    string         `json:"phase_before,omitempty"`
+	ResponseStyle  string         `json:"response_style,omitempty"`
+	CandidateStyle string         `json:"candidate_style,omitempty"`
+	Report         map[string]any `json:"report,omitempty"`
+	ToneSummary    map[string]any `json:"tone_summary,omitempty"`
+	EndedReason    string         `json:"ended_reason,omitempty"`
 }
 
 type Relay struct {
 	stt     *STTClient
 	model   ModelStreamer
+	prosody ProsodyDetector
 	signals *SignalStore
 	upgrade websocket.Upgrader
 }
 
 type ModelStreamer interface {
-	Stream(ctx context.Context, candidateID, text, contextBlock, language string) (<-chan StreamMessage, error)
+	Stream(ctx context.Context, candidateID, text, contextBlock, language, candidateStyle string) (<-chan StreamMessage, error)
 }
 
 func NewRelay(stt *STTClient, model ModelStreamer) *Relay {
 	return &Relay{
 		stt:     stt,
 		model:   model,
+		prosody: FallbackProsodyDetector{},
 		signals: &SignalStore{},
 		upgrade: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
@@ -127,6 +138,7 @@ func (r *Relay) handleFallbackWS(w http.ResponseWriter, req *http.Request) {
 			return conn.WriteJSON(out)
 		})
 		if err != nil {
+			_ = conn.WriteJSON(StreamMessage{Type: "error", Text: err.Error(), State: "error"})
 			return
 		}
 	}
@@ -138,7 +150,7 @@ func (r *Relay) relayBrowserPayload(ctx context.Context, raw []byte, send func(S
 		return err
 	}
 	if msg.Text != "" {
-		return r.streamTranscript(ctx, msg.CandidateID, msg.Text, msg.Language, send)
+		return r.streamTranscript(ctx, msg.CandidateID, msg.Text, msg.Language, styleOrDefault(msg.CandidateStyle), send)
 	}
 	if msg.Type == "audio" {
 		audio, err := decodeAudioPayload(msg.Data)
@@ -151,15 +163,72 @@ func (r *Relay) relayBrowserPayload(ctx context.Context, raw []byte, send func(S
 }
 
 func (r *Relay) relayAudio(ctx context.Context, audio []byte, candidateID, language string, send func(StreamMessage) error) error {
+	if !isTextBypass(audio) {
+		if err := send(StreamMessage{Type: "filler", Text: fillerFor(candidateID, language), State: "thinking", Language: normalizeRelayLanguage(language)}); err != nil {
+			return err
+		}
+	}
 	text, err := r.stt.Transcribe(ctx, audio, language)
 	if err != nil {
 		return err
 	}
-	return r.streamTranscript(ctx, candidateID, text, language, send)
+	style, err := r.prosody.DetectStyle(ctx, audio)
+	if err != nil {
+		style = "Default"
+	}
+	return r.streamTranscript(ctx, candidateID, text, language, styleOrDefault(style), send)
 }
 
-func (r *Relay) streamTranscript(ctx context.Context, candidateID, text, language string, send func(StreamMessage) error) error {
-	stream, err := r.model.Stream(ctx, candidateID, text, "relay context: live candidate interview", language)
+func isTextBypass(audio []byte) bool {
+	return strings.HasPrefix(strings.TrimSpace(string(audio)), "text:")
+}
+
+func fillerFor(candidateID, language string) string {
+	phrases := map[string][]string{
+		"en": {
+			"Hmm, interesting, let me think about that.",
+			"Got it, give me a moment to process that.",
+			"Okay, I am taking that in.",
+			"That is useful context, one moment.",
+		},
+		"hi": {
+			"Haan, samajh raha hoon, ek moment.",
+			"Achha, main isko process kar raha hoon.",
+			"Yeh useful context hai, ek second.",
+			"Theek hai, main soch raha hoon.",
+		},
+		"hinglish": {
+			"Got it, yeh useful context hai.",
+			"Hmm, interesting, ek moment.",
+			"Okay, main isko process kar raha hoon.",
+			"Samajh gaya, let me think about that.",
+		},
+	}
+	lang := normalizeRelayLanguage(language)
+	options := phrases[lang]
+	idx := 0
+	for _, r := range candidateID {
+		idx += int(r)
+	}
+	if len(options) == 0 {
+		return ""
+	}
+	return options[idx%len(options)]
+}
+
+func normalizeRelayLanguage(language string) string {
+	switch strings.ToLower(strings.TrimSpace(language)) {
+	case "hi", "hindi":
+		return "hi"
+	case "hinglish":
+		return "hinglish"
+	default:
+		return "en"
+	}
+}
+
+func (r *Relay) streamTranscript(ctx context.Context, candidateID, text, language, candidateStyle string, send func(StreamMessage) error) error {
+	stream, err := r.model.Stream(ctx, candidateID, text, "relay context: live candidate interview", language, styleOrDefault(candidateStyle))
 	if err != nil {
 		return err
 	}
