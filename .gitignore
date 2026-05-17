@@ -27,6 +27,12 @@ go.work.sum
 # env file
 .env
 
+# Local model weights
+models/*.gguf
+
+# Local Codex workspace metadata
+.codex/
+
 # Editor/IDE
 # .idea/
 # .vscode/

@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Interviewer Manual Mic Test</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 24px; max-width: 980px; }
+    label { display: block; margin-top: 12px; font-weight: 600; }
+    input, textarea, select, button { font: inherit; width: 100%; box-sizing: border-box; margin-top: 4px; padding: 8px; }
+    button { width: auto; margin-right: 8px; cursor: pointer; }
+    textarea { min-height: 90px; }
+    pre { background: #111; color: #eee; padding: 12px; overflow: auto; min-height: 260px; white-space: pre-wrap; }
+    .row { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; }
+    .row > label { flex: 1; min-width: 220px; }
+    .status { margin: 12px 0; font-weight: 700; }
+  </style>
+</head>
+<body>
+  <h1>AI Interviewer Manual Mic Test</h1>
+
+  <div class="row">
+    <label>Candidate ID
+      <input id="candidateId" value="manual_001" />
+    </label>
+    <label>Relay WebSocket URL
+      <input id="relayUrl" value="ws://localhost:3001/ws" />
+    </label>
+    <label>Language
+      <select id="language">
+        <option value="auto">auto</option>
+        <option value="en">en</option>
+        <option value="hi">hi</option>
+        <option value="hinglish">hinglish</option>
+      </select>
+    </label>
+  </div>
+
+  <label>Resume file (.pdf or .docx)
+    <input id="resumeFile" type="file" accept=".pdf,.docx" />
+  </label>
+
+  <label>Job description
+    <textarea id="jobDescription">Senior backend role requiring caching, API reliability, observability, incident response, and clear technical tradeoff reasoning.</textarea>
+  </label>
+
+  <div class="row">
+    <label>Seniority
+      <select id="seniority">
+        <option value="mid">mid</option>
+        <option value="senior" selected>senior</option>
+        <option value="junior">junior</option>
+      </select>
+    </label>
+    <label>Duration seconds
+      <input id="duration" type="number" value="420" min="30" />
+    </label>
+  </div>
+
+  <p>
+    <button id="startInterview">Start interview</button>
+    <button id="connectRelay">Connect relay</button>
+    <button id="record" disabled>Record answer</button>
+    <button id="endInterview">End interview</button>
+  </p>
+
+  <div class="status" id="status">Idle</div>
+  <pre id="log"></pre>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let ws = null;
+    let recorder = null;
+    let chunks = [];
+    let assistantBuffer = "";
+    let speechQueue = [];
+    let speaking = false;
+
+    function resetSpeech() {
+      assistantBuffer = "";
+      speechQueue = [];
+      speaking = false;
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+    }
+
+    function speakSentenceQueue() {
+      if (!("speechSynthesis" in window)) return;
+      if (speaking || speechQueue.length === 0) return;
+      speaking = true;
+      const utterance = new SpeechSynthesisUtterance(speechQueue.shift());
+      utterance.onend = () => {
+        speaking = false;
+        speakSentenceQueue();
+      };
+      utterance.onerror = () => {
+        speaking = false;
+        speakSentenceQueue();
+      };
+      window.speechSynthesis.speak(utterance);
+    }
+
+    function queueSentences(text) {
+      const cleaned = (text || "").trim();
+      if (!cleaned) return;
+      const matches = cleaned.match(/[^.!?]+[.!?]+(?:\s+|$)|[^.!?]+$/g) || [];
+      for (const sentence of matches) {
+        const value = sentence.trim();
+        if (value) {
+          speechQueue.push(value);
+        }
+      }
+      speakSentenceQueue();
+    }
+
+    function log(line, value) {
+      const text = value === undefined ? line : `${line} ${typeof value === "string" ? value : JSON.stringify(value, null, 2)}`;
+      $("log").textContent += text + "\n";
+      $("log").scrollTop = $("log").scrollHeight;
+    }
+
+    function setStatus(text) {
+      $("status").textContent = text;
+    }
+
+    $("startInterview").onclick = async () => {
+      const form = new FormData();
+      form.append("candidate_id", $("candidateId").value.trim());
+      form.append("job_description", $("jobDescription").value);
+      form.append("seniority", $("seniority").value);
+      form.append("duration_seconds", $("duration").value);
+      form.append("language", $("language").value);
+      if ($("resumeFile").files[0]) {
+        form.append("resume_file", $("resumeFile").files[0]);
+      }
+      setStatus("Starting interview...");
+      const res = await fetch("/interviews", { method: "POST", body: form });
+      const json = await res.json();
+      if (!res.ok) {
+        setStatus("Start failed");
+        log("START_ERROR", json);
+        return;
+      }
+      setStatus("Interview started");
+      log("FIRST_QUESTION", json);
+      resetSpeech();
+      queueSentences(json.first_question || "");
+    };
+
+    $("connectRelay").onclick = () => {
+      if (ws) ws.close();
+      ws = new WebSocket($("relayUrl").value.trim());
+      ws.onopen = () => {
+        setStatus("Relay connected");
+        $("record").disabled = false;
+        log("WS_OPEN");
+      };
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        log("WS", msg);
+        if (msg.type === "ack") {
+          resetSpeech();
+          return;
+        }
+        if (msg.type === "token" && msg.text) {
+          assistantBuffer += (assistantBuffer ? " " : "") + msg.text;
+          const sentences = assistantBuffer.match(/[^.!?]+[.!?]+(?:\s+|$)/g) || [];
+          if (sentences.length > 0) {
+            for (const sentence of sentences) {
+              queueSentences(sentence);
+            }
+            assistantBuffer = assistantBuffer.replace(/[^.!?]+[.!?]+(?:\s+|$)/g, "");
+          }
+          return;
+        }
+        if (msg.type === "end") {
+          setStatus("Listening");
+          queueSentences(assistantBuffer);
+          assistantBuffer = "";
+        }
+      };
+      ws.onclose = () => {
+        setStatus("Relay closed");
+        $("record").disabled = true;
+        log("WS_CLOSE");
+      };
+      ws.onerror = () => {
+        setStatus("Relay error");
+        log("WS_ERROR");
+      };
+    };
+
+    $("record").onclick = async () => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        alert("Connect relay first.");
+        return;
+      }
+      if (recorder && recorder.state === "recording") {
+        recorder.stop();
+        $("record").textContent = "Record answer";
+        setStatus("Transcribing and thinking...");
+        return;
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      chunks = [];
+      recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) chunks.push(event.data);
+      };
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((track) => track.stop());
+        const blob = new Blob(chunks, { type: "audio/webm" });
+        const reader = new FileReader();
+        reader.onload = () => {
+          const base64 = String(reader.result).split(",")[1];
+          ws.send(JSON.stringify({
+            type: "audio",
+            data: base64,
+            candidate_id: $("candidateId").value.trim(),
+            language: $("language").value
+          }));
+          log("AUDIO_SENT", `${Math.round(blob.size / 1024)} KB webm`);
+        };
+        reader.readAsDataURL(blob);
+      };
+      recorder.start();
+      $("record").textContent = "Stop recording";
+      setStatus("Recording...");
+    };
+
+    $("endInterview").onclick = async () => {
+      const candidateId = encodeURIComponent($("candidateId").value.trim());
+      setStatus("Ending interview...");
+      const res = await fetch(`/interviews/${candidateId}/end`, { method: "POST" });
+      const json = await res.json();
+      setStatus(res.ok ? "Interview ended" : "End failed");
+      log("REPORT", json);
+    };
+  </script>
+</body>
+</html>

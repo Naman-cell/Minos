@@ -1,0 +1,45 @@
+services:
+  model-service:
+    build:
+      context: ../../mlengineer/output/model-service
+    image: ai-interviewer/model-service:local
+    environment:
+      MODEL_ADDR: ":8080"
+      CONTEXT_DB: "/tmp/ai-interviewer-context.db"
+      BRAIN_C_MODE: "${BRAIN_C_MODE:-remote}"
+      BRAIN_C_URL: "${BRAIN_C_URL:-https://your-brain-c-ngrok-url.ngrok-free.app}"
+      BRAIN_C_API_KEY: "${BRAIN_C_API_KEY:-}"
+      BRAIN_C_TIMEOUT_SECONDS: "${BRAIN_C_TIMEOUT_SECONDS:-60}"
+      BRAIN_C_MAX_TOKENS: "${BRAIN_C_MAX_TOKENS:-320}"
+      BRAIN_C_TEMPERATURE: "${BRAIN_C_TEMPERATURE:-0.6}"
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "/model-service", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  backend-relay:
+    build:
+      context: ../../mlengineer/output/backend-relay
+    image: ai-interviewer/backend-relay:local
+    environment:
+      RELAY_ADDR: ":3000"
+      MODEL_WS_URL: "ws://model-service:8080/ws"
+      STT_MODE: "${STT_MODE:-brainc}"
+      BRAIN_C_URL: "${BRAIN_C_URL:-https://your-brain-c-ngrok-url.ngrok-free.app}"
+      BRAIN_C_API_KEY: "${BRAIN_C_API_KEY:-}"
+      STT_TIMEOUT_SECONDS: "${STT_TIMEOUT_SECONDS:-60}"
+      STT_MEDIA_NAME: "${STT_MEDIA_NAME:-candidate.webm}"
+      STT_MEDIA_TYPE: "${STT_MEDIA_TYPE:-audio/webm}"
+    ports:
+      - "3000:3000"
+    depends_on:
+      model-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/backend-relay", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

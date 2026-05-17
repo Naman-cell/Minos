@@ -1,0 +1,5 @@
+{"text":"I used Redis caching to reduce p95 latency from 900ms to 250ms.","label":"english","expected_anchor":"p95 latency"}
+{"text":"Maine cache lagaya tha kyunki database queries slow ho rahi thi.","label":"hinglish","expected_anchor":"cache"}
+{"text":"Deployment ke baad rollback plan ready tha, but metrics initially unstable the.","label":"hinglish","expected_anchor":"deployment"}
+{"text":"We improved the system somehow and it became better.","label":"vague","expected_anchor":"reliability"}
+{"text":"It was a difficult career gap after caregiving, but I kept practicing systems design.","label":"encourage","expected_anchor":"reliability"}
