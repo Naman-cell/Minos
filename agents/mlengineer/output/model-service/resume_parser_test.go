@@ -57,7 +57,7 @@ func TestStartInterviewAcceptsMultipartResumeFile(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var decoded StartInterviewResponse
+	var decoded CreateInterviewResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}

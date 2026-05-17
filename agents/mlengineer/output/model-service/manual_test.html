@@ -79,6 +79,7 @@
     let recorder = null;
     let chunks = [];
     let assistantBuffer = "";
+    let sessionId = "";
     let currentStyle = "Friendly";
     let currentLanguage = "en";
 
@@ -115,16 +116,25 @@
       const res = await fetch("/interviews", { method: "POST", body: form });
       const json = await res.json();
       if (!res.ok) {
+        setStatus("Create failed");
+        log("CREATE_ERROR", json);
+        return;
+      }
+      sessionId = json.session_id || "";
+      log("INTERVIEW_CREATED", json);
+      const startRes = await fetch(`/interviews/${encodeURIComponent(sessionId)}/start`, { method: "POST" });
+      const started = await startRes.json();
+      if (!startRes.ok) {
         setStatus("Start failed");
-        log("START_ERROR", json);
+        log("START_ERROR", started);
         return;
       }
       setStatus("Interview started");
-      log("FIRST_QUESTION", json);
+      log("INTERVIEW_STARTED", started);
       resetSpeech();
-      currentStyle = json.response_style || "Friendly";
-      currentLanguage = (json.session && json.session.language) || $("language").value || "en";
-      $("latestResponse").value = json.first_question || "";
+      currentStyle = started.style || started.response_style || "Friendly";
+      currentLanguage = (started.session && started.session.language) || $("language").value || "en";
+      $("latestResponse").value = started.response || started.first_question || "";
     };
 
     $("connectRelay").onclick = () => {
@@ -156,6 +166,13 @@
         }
         if (msg.type === "error") {
           setStatus("Relay/model error");
+          return;
+        }
+        if (msg.type === "interview_response") {
+          currentStyle = msg.style || msg.response_style || currentStyle;
+          currentLanguage = msg.language || currentLanguage || "en";
+          $("latestResponse").value = msg.response || msg.text || "";
+          setStatus(msg.status === "completed" ? "Interview completed" : "Listening");
           return;
         }
         if (msg.type === "token" && msg.text) {
@@ -203,6 +220,7 @@
         reader.onload = () => {
           const base64 = String(reader.result).split(",")[1];
           ws.send(JSON.stringify({
+            session_id: sessionId,
             type: "audio",
             data: base64,
             candidate_id: $("candidateId").value.trim(),
@@ -218,9 +236,9 @@
     };
 
     $("endInterview").onclick = async () => {
-      const candidateId = encodeURIComponent($("candidateId").value.trim());
+      const id = encodeURIComponent(sessionId || $("candidateId").value.trim());
       setStatus("Ending interview...");
-      const res = await fetch(`/interviews/${candidateId}/end`, { method: "POST" });
+      const res = await fetch(`/interviews/${id}/end`, { method: "POST" });
       const json = await res.json();
       setStatus(res.ok ? "Interview ended" : "End failed");
       log("REPORT", json);

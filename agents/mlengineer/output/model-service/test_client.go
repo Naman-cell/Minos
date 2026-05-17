@@ -12,6 +12,7 @@ import (
 )
 
 type clientModelRequest struct {
+	SessionID      string `json:"session_id,omitempty"`
 	CandidateID    string `json:"candidate_id,omitempty"`
 	Text           string `json:"text"`
 	Context        string `json:"context"`
@@ -33,6 +34,7 @@ func main() {
 	addr := flag.String("addr", "ws://localhost:8080/ws", "model service websocket URL")
 	text := flag.String("text", "I led a reliability migration and measured latency before and after.", "candidate transcript")
 	candidateID := flag.String("candidate-id", "test_001", "candidate session id")
+	sessionID := flag.String("session-id", "", "interview session id")
 	language := flag.String("language", "auto", "language preference: auto, en, hi, hinglish")
 	candidateStyle := flag.String("candidate-style", "Default", "candidate speaking style")
 	flag.Parse()
@@ -47,7 +49,7 @@ func main() {
 	defer conn.Close()
 
 	start := time.Now()
-	if err := conn.WriteJSON(clientModelRequest{CandidateID: *candidateID, Text: *text, Context: "Senior backend role requiring distributed systems and incident response.", Language: *language, CandidateStyle: *candidateStyle}); err != nil {
+	if err := conn.WriteJSON(clientModelRequest{SessionID: *sessionID, CandidateID: *candidateID, Text: *text, Context: "Senior backend role requiring distributed systems and incident response.", Language: *language, CandidateStyle: *candidateStyle}); err != nil {
 		log.Fatal(err)
 	}
 	for {

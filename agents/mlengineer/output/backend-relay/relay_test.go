@@ -13,7 +13,7 @@ import (
 
 type fakeModel struct{}
 
-func (f *fakeModel) Stream(ctx context.Context, candidateID, text, contextBlock, language, candidateStyle string) (<-chan StreamMessage, error) {
+func (f *fakeModel) Stream(ctx context.Context, sessionID, candidateID, text, contextBlock, language, candidateStyle string) (<-chan StreamMessage, error) {
 	out := make(chan StreamMessage, 4)
 	out <- StreamMessage{Type: "phase", Phase: "interview", PhaseBefore: "rapport", Language: "en"}
 	out <- StreamMessage{Type: "style", ResponseStyle: "Friendly", CandidateStyle: candidateStyle, Language: "en", Phase: "interview"}
@@ -23,7 +23,7 @@ func (f *fakeModel) Stream(ctx context.Context, candidateID, text, contextBlock,
 	return out, nil
 }
 
-func TestFallbackWebSocketRelaysStream(t *testing.T) {
+func TestFallbackWebSocketAggregatesModelStream(t *testing.T) {
 	relay := NewRelay(NewSTTClient(), &fakeModel{})
 	server := httptest.NewServer(relay.Routes())
 	defer server.Close()
@@ -40,25 +40,24 @@ func TestFallbackWebSocketRelaysStream(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []string{"phase:interview:rapport", "style:Friendly", "token:speaking", "end:listening"}
-	for _, expected := range want {
-		var msg StreamMessage
-		if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-			t.Fatal(err)
-		}
-		if err := conn.ReadJSON(&msg); err != nil {
-			t.Fatal(err)
-		}
-		got := msg.Type + ":" + msg.State
-		if msg.Type == "phase" {
-			got = msg.Type + ":" + msg.Phase + ":" + msg.PhaseBefore
-		}
-		if msg.Type == "style" {
-			got = msg.Type + ":" + msg.ResponseStyle
-		}
-		if got != expected {
-			t.Fatalf("got %s want %s", got, expected)
-		}
+	var msg StreamMessage
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.ReadJSON(&msg); err != nil {
+		t.Fatal(err)
+	}
+	if msg.Type != "interview_response" {
+		t.Fatalf("type=%q want interview_response", msg.Type)
+	}
+	if msg.Response != "Why?" {
+		t.Fatalf("response=%q want Why?", msg.Response)
+	}
+	if msg.Style != "Friendly" {
+		t.Fatalf("style=%q want Friendly", msg.Style)
+	}
+	if msg.Status != "not_completed" {
+		t.Fatalf("status=%q want not_completed", msg.Status)
 	}
 }
 

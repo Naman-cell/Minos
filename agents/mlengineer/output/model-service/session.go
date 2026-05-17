@@ -13,6 +13,7 @@ type TranscriptTurn struct {
 }
 
 type CandidateSession struct {
+	SessionID          string
 	CandidateID        string
 	CandidateName      string
 	ResumeText         string
@@ -32,6 +33,7 @@ type CandidateSession struct {
 	InterviewStartedAt time.Time
 	RollingSummary     string
 	Ended              bool
+	ClosingPending     bool
 	Report             map[string]any
 	ReportRaw          map[string]any
 	ToneSummary        map[string]any
@@ -57,10 +59,15 @@ type StartInterviewRequest struct {
 }
 
 func (s *SessionStore) Start(req StartInterviewRequest) *CandidateSession {
+	return s.Create(req)
+}
+
+func (s *SessionStore) Create(req StartInterviewRequest) *CandidateSession {
 	candidateID := strings.TrimSpace(req.CandidateID)
 	if candidateID == "" {
 		candidateID = fmt.Sprintf("candidate_%d", time.Now().UnixNano())
 	}
+	sessionID := fmt.Sprintf("session_%d", time.Now().UnixNano())
 	duration := req.DurationSeconds
 	if duration <= 0 {
 		duration = 7 * 60
@@ -71,19 +78,20 @@ func (s *SessionStore) Start(req StartInterviewRequest) *CandidateSession {
 	}
 	now := time.Now()
 	session := &CandidateSession{
-		CandidateID:        candidateID,
-		CandidateName:      strings.TrimSpace(req.CandidateName),
-		ResumeText:         req.ResumeText,
-		JobDescription:     req.JobDescription,
-		Seniority:          seniority,
-		DurationSeconds:    duration,
-		Language:           normalizeLanguage(req.Language),
-		LastLevel:          2,
-		InSettlingPhase:    true,
-		SettlingStartedAt:  now,
-		InterviewStartedAt: now,
+		SessionID:         sessionID,
+		CandidateID:       candidateID,
+		CandidateName:     strings.TrimSpace(req.CandidateName),
+		ResumeText:        req.ResumeText,
+		JobDescription:    req.JobDescription,
+		Seniority:         seniority,
+		DurationSeconds:   duration,
+		Language:          normalizeLanguage(req.Language),
+		LastLevel:         2,
+		InSettlingPhase:   true,
+		SettlingStartedAt: now,
 	}
 	s.mu.Lock()
+	s.sessions[sessionID] = session
 	s.sessions[candidateID] = session
 	s.mu.Unlock()
 	return session
@@ -103,6 +111,7 @@ func (s *SessionStore) Get(candidateID, context string) *CandidateSession {
 	}
 	now := time.Now()
 	session := &CandidateSession{
+		SessionID:          candidateID,
 		CandidateID:        candidateID,
 		JobDescription:     context,
 		Seniority:          "mid",
@@ -124,11 +133,33 @@ func (s *SessionStore) Find(candidateID string) (*CandidateSession, bool) {
 	return session, ok
 }
 
+func (s *CandidateSession) MarkStarted(now time.Time) {
+	if s.InterviewStartedAt.IsZero() {
+		s.InterviewStartedAt = now
+	}
+	s.SettlingStartedAt = now
+	s.InSettlingPhase = true
+}
+
 func (s *CandidateSession) Expired(now time.Time) bool {
 	if s.DurationSeconds <= 0 {
 		return false
 	}
+	if s.InterviewStartedAt.IsZero() {
+		return false
+	}
 	return now.Sub(s.InterviewStartedAt) >= time.Duration(s.DurationSeconds)*time.Second
+}
+
+func (s *CandidateSession) timeRemaining(now time.Time) time.Duration {
+	if s.DurationSeconds <= 0 || s.InterviewStartedAt.IsZero() {
+		return time.Hour
+	}
+	remaining := time.Duration(s.DurationSeconds)*time.Second - now.Sub(s.InterviewStartedAt)
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
 }
 
 func (s *CandidateSession) AppendUser(content string) {

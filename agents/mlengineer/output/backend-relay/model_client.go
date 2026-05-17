@@ -8,6 +8,7 @@ import (
 )
 
 type ModelRequest struct {
+	SessionID      string `json:"session_id,omitempty"`
 	CandidateID    string `json:"candidate_id,omitempty"`
 	Text           string `json:"text"`
 	Context        string `json:"context"`
@@ -23,14 +24,14 @@ func NewModelClient(url string) *ModelClient {
 	return &ModelClient{url: url}
 }
 
-func (m *ModelClient) Stream(ctx context.Context, candidateID, text, contextBlock, language, candidateStyle string) (<-chan StreamMessage, error) {
+func (m *ModelClient) Stream(ctx context.Context, sessionID, candidateID, text, contextBlock, language, candidateStyle string) (<-chan StreamMessage, error) {
 	out := make(chan StreamMessage)
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, m.url, nil)
 	if err != nil {
 		go mockStream(ctx, out)
 		return out, nil
 	}
-	if err := conn.WriteJSON(ModelRequest{CandidateID: candidateID, Text: text, Context: contextBlock, Language: language, CandidateStyle: styleOrDefault(candidateStyle)}); err != nil {
+	if err := conn.WriteJSON(ModelRequest{SessionID: sessionID, CandidateID: candidateID, Text: text, Context: contextBlock, Language: language, CandidateStyle: styleOrDefault(candidateStyle)}); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}

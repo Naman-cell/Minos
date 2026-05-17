@@ -13,7 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-func TestInterviewTurnStartUsesGreetingPath(t *testing.T) {
+func TestInterviewCreateReturnsSessionID(t *testing.T) {
 	t.Setenv("USE_INTERVIEW_TURN", "true")
 	server := NewServer(mustBrainA(t), NewBrainB(), NewMockBrainC(), NewStateMachine())
 
@@ -36,21 +36,82 @@ func TestInterviewTurnStartUsesGreetingPath(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var decoded StartInterviewResponse
+	var decoded CreateInterviewResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.FirstQuestion == "" {
+	if decoded.SessionID == "" {
+		t.Fatal("expected session_id")
+	}
+	if decoded.Status != "created" {
+		t.Fatalf("status=%q want created", decoded.Status)
+	}
+}
+
+func TestInterviewStartUsesGreetingPath(t *testing.T) {
+	t.Setenv("USE_INTERVIEW_TURN", "true")
+	server := NewServer(mustBrainA(t), NewBrainB(), NewMockBrainC(), NewStateMachine())
+	httpServer := httptest.NewServer(server.Routes())
+	defer httpServer.Close()
+
+	sessionID := createSession(t, httpServer.URL, "turn_start_001")
+	req, err := http.NewRequest(http.MethodPost, httpServer.URL+"/interviews/"+sessionID+"/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("start status=%s", resp.Status)
+	}
+	var decoded StartInterviewResponse
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Response == "" {
 		t.Fatal("expected greeting response")
 	}
-	if decoded.ResponseStyle == "" {
-		t.Fatal("expected response_style for frontend TTS handoff")
+	if decoded.Style == "" {
+		t.Fatal("expected style for frontend TTS handoff")
 	}
-	assertNotContains(t, decoded.FirstQuestion, "Score:")
-	assertNotContains(t, decoded.FirstQuestion, "Issues:")
-	assertNotContains(t, decoded.FirstQuestion, "system prompt")
+	assertNotContains(t, decoded.Response, "Score:")
+	assertNotContains(t, decoded.Response, "Issues:")
+	assertNotContains(t, decoded.Response, "system prompt")
 	if decoded.Session["use_turn_api"] != true {
 		t.Fatalf("expected use_turn_api marker, got %#v", decoded.Session["use_turn_api"])
+	}
+}
+
+func TestGetInterviewBySessionIDReturnsFrontendShape(t *testing.T) {
+	t.Setenv("USE_INTERVIEW_TURN", "true")
+	server := NewServer(mustBrainA(t), NewBrainB(), NewMockBrainC(), NewStateMachine())
+	httpServer := httptest.NewServer(server.Routes())
+	defer httpServer.Close()
+
+	sessionID := createSession(t, httpServer.URL, "turn_get_001")
+	resp, err := http.Get(httpServer.URL + "/interviews/" + sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%s", resp.Status)
+	}
+	var decoded GetInterviewResponse
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.SessionID != sessionID {
+		t.Fatalf("session_id=%q want %q", decoded.SessionID, sessionID)
+	}
+	if decoded.CandidateID != "turn_get_001" {
+		t.Fatalf("candidate_id=%q", decoded.CandidateID)
+	}
+	if decoded.Status != "not_completed" {
+		t.Fatalf("status=%q want not_completed", decoded.Status)
 	}
 }
 
@@ -60,7 +121,7 @@ func TestInterviewTurnWebSocketDoesNotEmitLegacyAck(t *testing.T) {
 	httpServer := httptest.NewServer(server.Routes())
 	defer httpServer.Close()
 
-	startSession(t, httpServer.URL, "turn_ws_001")
+	sessionID := startSession(t, httpServer.URL, "turn_ws_001")
 	url := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws"
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
@@ -69,6 +130,7 @@ func TestInterviewTurnWebSocketDoesNotEmitLegacyAck(t *testing.T) {
 	defer conn.Close()
 
 	if err := conn.WriteJSON(ModelRequest{
+		SessionID:   sessionID,
 		CandidateID: "turn_ws_001",
 		Text:        "Mujhe ye nahi pata, honestly.",
 		Context:     "Senior backend role requiring API reliability.",
@@ -114,7 +176,7 @@ func TestCleanInterviewResponseRemovesWrapperAndPlaceholder(t *testing.T) {
 	}
 }
 
-func startSession(t *testing.T, baseURL, candidateID string) {
+func createSession(t *testing.T, baseURL, candidateID string) string {
 	t.Helper()
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
@@ -135,8 +197,34 @@ func startSession(t *testing.T, baseURL, candidateID string) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status=%s", resp.Status)
+	}
+	var decoded CreateInterviewResponse
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.SessionID == "" {
+		t.Fatal("missing session_id")
+	}
+	return decoded.SessionID
+}
+
+func startSession(t *testing.T, baseURL, candidateID string) string {
+	t.Helper()
+	sessionID := createSession(t, baseURL, candidateID)
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/interviews/"+sessionID+"/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("start status=%s", resp.Status)
 	}
+	return sessionID
 }
 
 func assertNotContains(t *testing.T, text, forbidden string) {

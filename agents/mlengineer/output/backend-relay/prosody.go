@@ -22,3 +22,11 @@ func styleOrDefault(style string) string {
 	}
 	return style
 }
+
+func responseStyleOrDefault(style string) string {
+	style = strings.TrimSpace(style)
+	if style == "" {
+		return "Friendly"
+	}
+	return style
+}

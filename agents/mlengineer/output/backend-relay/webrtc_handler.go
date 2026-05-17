@@ -13,6 +13,7 @@ import (
 )
 
 type BrowserMessage struct {
+	SessionID      string `json:"session_id,omitempty"`
 	Type           string `json:"type"`
 	Data           string `json:"data,omitempty"`
 	Text           string `json:"text,omitempty"`
@@ -22,6 +23,7 @@ type BrowserMessage struct {
 }
 
 type StreamMessage struct {
+	SessionID      string         `json:"session_id,omitempty"`
 	Type           string         `json:"type"`
 	Text           string         `json:"text,omitempty"`
 	State          string         `json:"state,omitempty"`
@@ -33,6 +35,9 @@ type StreamMessage struct {
 	Report         map[string]any `json:"report,omitempty"`
 	ToneSummary    map[string]any `json:"tone_summary,omitempty"`
 	EndedReason    string         `json:"ended_reason,omitempty"`
+	Status         string         `json:"status,omitempty"`
+	Response       string         `json:"response,omitempty"`
+	Style          string         `json:"style,omitempty"`
 }
 
 type Relay struct {
@@ -44,7 +49,7 @@ type Relay struct {
 }
 
 type ModelStreamer interface {
-	Stream(ctx context.Context, candidateID, text, contextBlock, language, candidateStyle string) (<-chan StreamMessage, error)
+	Stream(ctx context.Context, sessionID, candidateID, text, contextBlock, language, candidateStyle string) (<-chan StreamMessage, error)
 }
 
 func NewRelay(stt *STTClient, model ModelStreamer) *Relay {
@@ -103,7 +108,7 @@ func (r *Relay) consumeAudioTrack(ctx context.Context, track *webrtc.TrackRemote
 			return
 		case <-deadline:
 			if len(audio) > 0 {
-				_ = r.relayAudio(ctx, audio, "", "auto", func(out StreamMessage) error {
+				_ = r.relayAudio(ctx, audio, "", "", "auto", func(out StreamMessage) error {
 					raw, _ := json.Marshal(out)
 					return channel.SendText(string(raw))
 				})
@@ -150,19 +155,19 @@ func (r *Relay) relayBrowserPayload(ctx context.Context, raw []byte, send func(S
 		return err
 	}
 	if msg.Text != "" {
-		return r.streamTranscript(ctx, msg.CandidateID, msg.Text, msg.Language, styleOrDefault(msg.CandidateStyle), send)
+		return r.streamTranscript(ctx, msg.SessionID, msg.CandidateID, msg.Text, msg.Language, styleOrDefault(msg.CandidateStyle), send)
 	}
 	if msg.Type == "audio" {
 		audio, err := decodeAudioPayload(msg.Data)
 		if err != nil {
 			return err
 		}
-		return r.relayAudio(ctx, audio, msg.CandidateID, msg.Language, send)
+		return r.relayAudio(ctx, audio, msg.SessionID, msg.CandidateID, msg.Language, send)
 	}
 	return nil
 }
 
-func (r *Relay) relayAudio(ctx context.Context, audio []byte, candidateID, language string, send func(StreamMessage) error) error {
+func (r *Relay) relayAudio(ctx context.Context, audio []byte, sessionID, candidateID, language string, send func(StreamMessage) error) error {
 	if !isTextBypass(audio) {
 		if err := send(StreamMessage{Type: "filler", Text: fillerFor(candidateID, language), State: "thinking", Language: normalizeRelayLanguage(language)}); err != nil {
 			return err
@@ -176,7 +181,7 @@ func (r *Relay) relayAudio(ctx context.Context, audio []byte, candidateID, langu
 	if err != nil {
 		style = "Default"
 	}
-	return r.streamTranscript(ctx, candidateID, text, language, styleOrDefault(style), send)
+	return r.streamTranscript(ctx, sessionID, candidateID, text, language, styleOrDefault(style), send)
 }
 
 func isTextBypass(audio []byte) bool {
@@ -227,17 +232,66 @@ func normalizeRelayLanguage(language string) string {
 	}
 }
 
-func (r *Relay) streamTranscript(ctx context.Context, candidateID, text, language, candidateStyle string, send func(StreamMessage) error) error {
-	stream, err := r.model.Stream(ctx, candidateID, text, "relay context: live candidate interview", language, styleOrDefault(candidateStyle))
+func (r *Relay) streamTranscript(ctx context.Context, sessionID, candidateID, text, language, candidateStyle string, send func(StreamMessage) error) error {
+	stream, err := r.model.Stream(ctx, sessionID, candidateID, text, "relay context: live candidate interview", language, styleOrDefault(candidateStyle))
 	if err != nil {
 		return err
 	}
+	aggregated := StreamMessage{
+		SessionID: sessionID,
+		Type:      "interview_response",
+		Status:    "not_completed",
+		Language:  normalizeRelayLanguage(language),
+		Style:     "Friendly",
+	}
+	var words []string
 	for msg := range stream {
-		if err := send(msg); err != nil {
-			return err
+		switch msg.Type {
+		case "style":
+			aggregated.Style = responseStyleOrDefault(msg.ResponseStyle)
+			aggregated.Language = msg.Language
+			aggregated.Phase = msg.Phase
+		case "phase":
+			aggregated.Phase = msg.Phase
+			aggregated.PhaseBefore = msg.PhaseBefore
+			if msg.Language != "" {
+				aggregated.Language = msg.Language
+			}
+		case "token":
+			if msg.Text != "" {
+				words = append(words, msg.Text)
+			}
+			if msg.Language != "" {
+				aggregated.Language = msg.Language
+			}
+		case "report":
+			aggregated.Report = msg.Report
+			aggregated.ToneSummary = msg.ToneSummary
+			aggregated.Status = "completed"
+			aggregated.EndedReason = msg.EndedReason
+		case "end":
+			if msg.Status != "" {
+				aggregated.Status = msg.Status
+			}
+			if msg.State == "completed" || msg.State == "ended" {
+				aggregated.Status = "completed"
+			}
+			if msg.Response != "" {
+				aggregated.Response = msg.Response
+			}
+			if msg.Language != "" {
+				aggregated.Language = msg.Language
+			}
+		case "error":
+			return send(msg)
 		}
 	}
-	return nil
+	if aggregated.Response == "" {
+		aggregated.Response = strings.Join(words, " ")
+	}
+	aggregated.Text = aggregated.Response
+	aggregated.ResponseStyle = aggregated.Style
+	return send(aggregated)
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

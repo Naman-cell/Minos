@@ -16,6 +16,7 @@ import (
 var manualTestHTML string
 
 type ModelRequest struct {
+	SessionID      string `json:"session_id,omitempty"`
 	CandidateID    string `json:"candidate_id,omitempty"`
 	Text           string `json:"text"`
 	Context        string `json:"context"`
@@ -24,16 +25,21 @@ type ModelRequest struct {
 }
 
 type StartInterviewResponse struct {
+	SessionID       string         `json:"session_id,omitempty"`
 	CandidateID     string         `json:"candidate_id"`
 	DurationSeconds int            `json:"duration_seconds"`
+	Response        string         `json:"response,omitempty"`
 	FirstQuestion   string         `json:"first_question"`
 	ResponseStyle   string         `json:"response_style,omitempty"`
+	Style           string         `json:"style,omitempty"`
+	Status          string         `json:"status,omitempty"`
 	StreamURL       string         `json:"stream_url"`
 	StartedAt       time.Time      `json:"started_at"`
 	Session         map[string]any `json:"session"`
 }
 
 type EndInterviewResponse struct {
+	SessionID   string         `json:"session_id,omitempty"`
 	CandidateID string         `json:"candidate_id"`
 	Ended       bool           `json:"ended"`
 	Report      map[string]any `json:"report"`
@@ -53,6 +59,8 @@ type StreamMessage struct {
 	Report         map[string]any `json:"report,omitempty"`
 	ToneSummary    map[string]any `json:"tone_summary,omitempty"`
 	EndedReason    string         `json:"ended_reason,omitempty"`
+	Status         string         `json:"status,omitempty"`
+	Response       string         `json:"response,omitempty"`
 }
 
 type Server struct {
@@ -63,6 +71,31 @@ type Server struct {
 	sessions *SessionStore
 	upgrade  websocket.Upgrader
 	useTurns bool
+}
+
+type CreateInterviewResponse struct {
+	SessionID       string `json:"session_id"`
+	CandidateID     string `json:"candidate_id"`
+	DurationSeconds int    `json:"duration_seconds"`
+	Status          string `json:"status"`
+	StartURL        string `json:"start_url"`
+	StreamURL       string `json:"stream_url"`
+}
+
+type GetInterviewResponse struct {
+	SessionID         string         `json:"session_id"`
+	CandidateID       string         `json:"candidate_id"`
+	CandidateName     string         `json:"candidate_name,omitempty"`
+	DurationSeconds   int            `json:"duration_seconds"`
+	StartedAt         *time.Time     `json:"started_at,omitempty"`
+	Status            string         `json:"status"`
+	Phase             string         `json:"phase,omitempty"`
+	Language          string         `json:"language,omitempty"`
+	JobDescription    string         `json:"job_description,omitempty"`
+	Seniority         string         `json:"seniority,omitempty"`
+	LastResponseStyle string         `json:"last_response_style,omitempty"`
+	ReportReady       bool           `json:"report_ready"`
+	ToneSummary       map[string]any `json:"tone_summary,omitempty"`
 }
 
 func NewServer(a *BrainA, b *BrainB, c BrainC, states *StateMachine) *Server {
@@ -107,7 +140,24 @@ func (s *Server) handleInterviews(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session := s.sessions.Start(req)
+	if r.URL.Query().Get("start") != "true" {
+		if strings.TrimSpace(req.ResumeText+" "+req.JobDescription) != "" {
+			if err := s.brainA.StoreTurnWithLanguage(req.ResumeText+"\n"+req.JobDescription, normalizeLanguage(req.Language)); err != nil {
+				log.Printf("brain A store interview create context failed: %v", err)
+			}
+		}
+		writeJSON(w, http.StatusCreated, CreateInterviewResponse{
+			SessionID:       session.SessionID,
+			CandidateID:     session.CandidateID,
+			DurationSeconds: session.DurationSeconds,
+			Status:          "created",
+			StartURL:        "/interviews/" + session.SessionID + "/start",
+			StreamURL:       "/ws",
+		})
+		return
+	}
 	if s.useTurns {
+		s.startInterviewClock(session)
 		if err := s.brainC.LedgerStart(r.Context(), session.CandidateID); err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "brain C ledger start failed: " + err.Error()})
 			return
@@ -121,10 +171,14 @@ func (s *Server) handleInterviews(w http.ResponseWriter, r *http.Request) {
 		s.applyInterviewTurn(session, turn)
 		session.AppendAssistant(turn.ResponseText)
 		writeJSON(w, http.StatusCreated, StartInterviewResponse{
+			SessionID:       session.SessionID,
 			CandidateID:     session.CandidateID,
 			DurationSeconds: session.DurationSeconds,
+			Response:        turn.ResponseText,
 			FirstQuestion:   turn.ResponseText,
 			ResponseStyle:   responseStyleOrDefault(turn.ResponseStyle),
+			Style:           responseStyleOrDefault(turn.ResponseStyle),
+			Status:          interviewStatus(session),
 			StreamURL:       "/ws",
 			StartedAt:       session.InterviewStartedAt,
 			Session: map[string]any{
@@ -165,6 +219,80 @@ func (s *Server) handleInterviews(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) startInterview(ctx context.Context, session *CandidateSession) (StartInterviewResponse, error) {
+	s.startInterviewClock(session)
+	if err := s.brainC.LedgerStart(ctx, session.CandidateID); err != nil {
+		return StartInterviewResponse{}, err
+	}
+	turn, err := s.brainC.InterviewTurn(ctx, s.newInterviewTurnRequest(session, "", session.Language))
+	if err != nil {
+		return StartInterviewResponse{}, err
+	}
+	turn.ResponseText = cleanInterviewResponse(turn.ResponseText, session.CandidateName)
+	s.applyInterviewTurn(session, turn)
+	session.AppendAssistant(turn.ResponseText)
+	style := responseStyleOrDefault(turn.ResponseStyle)
+	return StartInterviewResponse{
+		SessionID:       session.SessionID,
+		CandidateID:     session.CandidateID,
+		DurationSeconds: session.DurationSeconds,
+		Response:        turn.ResponseText,
+		FirstQuestion:   turn.ResponseText,
+		ResponseStyle:   style,
+		Style:           style,
+		Status:          interviewStatus(session),
+		StreamURL:       "/ws",
+		StartedAt:       session.InterviewStartedAt,
+		Session: map[string]any{
+			"session_id":      session.SessionID,
+			"seniority":       session.Seniority,
+			"job_description": session.JobDescription,
+			"phase":           session.Phase,
+			"language":        session.Language,
+			"response_style":  style,
+			"use_turn_api":    true,
+		},
+	}, nil
+}
+
+func (s *Server) startInterviewClock(session *CandidateSession) {
+	session.MarkStarted(time.Now())
+}
+
+func newGetInterviewResponse(session *CandidateSession) GetInterviewResponse {
+	var startedAt *time.Time
+	if !session.InterviewStartedAt.IsZero() {
+		started := session.InterviewStartedAt
+		startedAt = &started
+	}
+	return GetInterviewResponse{
+		SessionID:         session.SessionID,
+		CandidateID:       session.CandidateID,
+		CandidateName:     session.CandidateName,
+		DurationSeconds:   session.DurationSeconds,
+		StartedAt:         startedAt,
+		Status:            interviewStatus(session),
+		Phase:             session.Phase,
+		Language:          session.Language,
+		JobDescription:    session.JobDescription,
+		Seniority:         session.Seniority,
+		LastResponseStyle: session.LastResponseStyle,
+		ReportReady:       session.Report != nil,
+		ToneSummary:       session.ToneSummary,
+	}
+}
+
+func (s *Server) sessionForRequest(req ModelRequest) *CandidateSession {
+	key := strings.TrimSpace(req.SessionID)
+	if key == "" {
+		key = strings.TrimSpace(req.CandidateID)
+	}
+	if session, ok := s.sessions.Find(key); ok {
+		return session
+	}
+	return s.sessions.Get(key, req.Context)
+}
+
 func (s *Server) handleInterviewByID(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/interviews/")
 	parts := strings.Split(strings.Trim(path, "/"), "/")
@@ -174,13 +302,25 @@ func (s *Server) handleInterviewByID(w http.ResponseWriter, r *http.Request) {
 	}
 	candidateID := parts[0]
 	switch {
+	case len(parts) == 2 && parts[1] == "start" && r.Method == http.MethodPost:
+		session, ok := s.sessions.Find(candidateID)
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "interview not found"})
+			return
+		}
+		resp, err := s.startInterview(r.Context(), session)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
 	case len(parts) == 1 && r.Method == http.MethodGet:
 		session, ok := s.sessions.Find(candidateID)
 		if !ok {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "interview not found"})
 			return
 		}
-		writeJSON(w, http.StatusOK, session)
+		writeJSON(w, http.StatusOK, newGetInterviewResponse(session))
 	case len(parts) == 2 && parts[1] == "end" && r.Method == http.MethodPost:
 		session, ok := s.sessions.Find(candidateID)
 		if !ok {
@@ -192,7 +332,7 @@ func (s *Server) handleInterviewByID(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, EndInterviewResponse{CandidateID: candidateID, Ended: true, Report: report, ToneSummary: session.ToneSummary, Raw: raw})
+		writeJSON(w, http.StatusOK, EndInterviewResponse{SessionID: session.SessionID, CandidateID: session.CandidateID, Ended: true, Report: report, ToneSummary: session.ToneSummary, Raw: raw})
 	case len(parts) == 2 && parts[1] == "report" && r.Method == http.MethodGet:
 		session, ok := s.sessions.Find(candidateID)
 		if !ok {
@@ -200,10 +340,10 @@ func (s *Server) handleInterviewByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if session.Report == nil {
-			writeJSON(w, http.StatusAccepted, map[string]any{"candidate_id": candidateID, "ready": false})
+			writeJSON(w, http.StatusAccepted, map[string]any{"session_id": session.SessionID, "candidate_id": session.CandidateID, "ready": false})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"candidate_id": candidateID, "ready": true, "report": session.Report, "tone_summary": session.ToneSummary, "raw": session.ReportRaw})
+		writeJSON(w, http.StatusOK, map[string]any{"session_id": session.SessionID, "candidate_id": session.CandidateID, "ready": true, "report": session.Report, "tone_summary": session.ToneSummary, "raw": session.ReportRaw})
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 	}
@@ -235,7 +375,7 @@ func (s *Server) handleTurn(ctx context.Context, conn *websocket.Conn, req Model
 	}
 	start := time.Now()
 	req.Text = strings.TrimSpace(req.Text)
-	session := s.sessions.Get(req.CandidateID, req.Context)
+	session := s.sessionForRequest(req)
 	behavior := s.brainB.Analyze(req.Text, req.Language)
 	if err := conn.WriteJSON(StreamMessage{Type: "ack", Text: behavior.Ack, State: "thinking", Language: behavior.Language}); err != nil {
 		return err
@@ -281,17 +421,20 @@ func (s *Server) handleTurn(ctx context.Context, conn *websocket.Conn, req Model
 
 func (s *Server) handleInterviewTurn(ctx context.Context, conn *websocket.Conn, req ModelRequest) error {
 	req.Text = strings.TrimSpace(req.Text)
-	session := s.sessions.Get(req.CandidateID, req.Context)
-	if session.Expired(time.Now()) {
-		report, raw, err := s.finalizeInterview(ctx, session)
-		if err != nil {
+	session := s.sessionForRequest(req)
+	s.startInterviewClock(session)
+	if session.Ended {
+		return s.writeCompletedResponse(ctx, conn, closingResponse(session), session.Language, "Friendly", session)
+	}
+	if session.ClosingPending || session.Expired(time.Now()) {
+		session.AppendUser(req.Text)
+		session.ClosingPending = false
+		session.Ended = true
+		if err := s.writeCompletedResponse(ctx, conn, closingResponse(session), session.Language, "Friendly", session); err != nil {
 			return err
 		}
-		_ = raw
-		if err := conn.WriteJSON(StreamMessage{Type: "report", Report: report, ToneSummary: session.ToneSummary, EndedReason: "timeout"}); err != nil {
-			return err
-		}
-		return conn.WriteJSON(StreamMessage{Type: "end", State: "ended", Language: session.Language, Phase: session.Phase})
+		_, _, err := s.finalizeInterview(ctx, session)
+		return err
 	}
 
 	behavior := s.brainB.Analyze(req.Text, req.Language)
@@ -321,6 +464,9 @@ func (s *Server) handleInterviewTurn(ctx context.Context, conn *websocket.Conn, 
 	}
 	if err := s.writeStyledResponse(ctx, conn, turn.ResponseText, turn.Language, turn.ResponseStyle, turn.Phase, session); err != nil {
 		return err
+	}
+	if session.timeRemaining(time.Now()) <= time.Minute {
+		session.ClosingPending = true
 	}
 	if turn.Safety.Triggered {
 		report, _, err := s.finalizeInterview(ctx, session)
@@ -515,6 +661,26 @@ func (s *Server) writeStyledResponse(ctx context.Context, conn *websocket.Conn, 
 	return s.writeTokenResponse(ctx, conn, response, language, session)
 }
 
+func (s *Server) writeCompletedResponse(ctx context.Context, conn *websocket.Conn, response string, language string, responseStyle string, session *CandidateSession) error {
+	style := responseStyleOrDefault(responseStyle)
+	if err := conn.WriteJSON(StreamMessage{
+		Type:          "style",
+		ResponseStyle: style,
+		Language:      language,
+		Phase:         "wrap",
+		Status:        "completed",
+	}); err != nil {
+		return err
+	}
+	session.AppendAssistant(response)
+	for token := range streamWords(ctx, strings.TrimSpace(response), 5*time.Millisecond) {
+		if err := conn.WriteJSON(StreamMessage{Type: "token", Text: token, State: "speaking", Language: language}); err != nil {
+			return err
+		}
+	}
+	return conn.WriteJSON(StreamMessage{Type: "end", State: "completed", Language: language, Status: "completed", Response: response})
+}
+
 func (s *Server) writeTokenResponse(ctx context.Context, conn *websocket.Conn, response string, language string, session *CandidateSession) error {
 	session.AppendAssistant(response)
 	for token := range streamWords(ctx, strings.TrimSpace(response), 5*time.Millisecond) {
@@ -531,6 +697,21 @@ func responseStyleOrDefault(style string) string {
 		return "Friendly"
 	}
 	return style
+}
+
+func interviewStatus(session *CandidateSession) string {
+	if session.Ended {
+		return "completed"
+	}
+	return "not_completed"
+}
+
+func closingResponse(session *CandidateSession) string {
+	name := strings.TrimSpace(session.CandidateName)
+	if name == "" {
+		name = "there"
+	}
+	return "Thanks " + name + " for joining. It was really nice talking to you, and I hope your interview experience was good. Have a nice day."
 }
 
 func cleanInterviewResponse(text, candidateName string) string {
@@ -551,13 +732,16 @@ func cleanInterviewResponse(text, candidateName string) string {
 	if name == "" {
 		name = "there"
 	}
-	replacements := map[string]string{
-		"[Candidate Name]": name,
-		"[candidate name]": name,
-		"Candidate Name":   name,
+	replacements := []struct {
+		old string
+		new string
+	}{
+		{"[Candidate Name]", name},
+		{"[candidate name]", name},
+		{"Candidate Name", name},
 	}
-	for placeholder, value := range replacements {
-		cleaned = strings.ReplaceAll(cleaned, placeholder, value)
+	for _, replacement := range replacements {
+		cleaned = strings.ReplaceAll(cleaned, replacement.old, replacement.new)
 	}
 	return strings.TrimSpace(cleaned)
 }

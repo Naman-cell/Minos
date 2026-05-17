@@ -13,6 +13,7 @@ import (
 )
 
 type clientBrowserMessage struct {
+	SessionID      string `json:"session_id,omitempty"`
 	Type           string `json:"type"`
 	Data           string `json:"data,omitempty"`
 	Text           string `json:"text,omitempty"`
@@ -29,12 +30,16 @@ type clientStreamMessage struct {
 	Phase         string `json:"phase,omitempty"`
 	PhaseBefore   string `json:"phase_before,omitempty"`
 	ResponseStyle string `json:"response_style,omitempty"`
+	Response      string `json:"response,omitempty"`
+	Style         string `json:"style,omitempty"`
+	Status        string `json:"status,omitempty"`
 }
 
 func main() {
 	addr := flag.String("addr", "ws://localhost:3000/ws", "relay fallback websocket URL")
 	text := flag.String("text", "I measured reliability during the migration with latency and error budgets.", "candidate transcript")
 	candidateID := flag.String("candidate-id", "test_001", "candidate session id")
+	sessionID := flag.String("session-id", "", "interview session id")
 	language := flag.String("language", "auto", "language preference: auto, en, hi, hinglish")
 	candidateStyle := flag.String("candidate-style", "Default", "candidate speaking style")
 	flag.Parse()
@@ -50,7 +55,7 @@ func main() {
 
 	start := time.Now()
 	payload := base64.StdEncoding.EncodeToString([]byte("text:" + *text))
-	if err := conn.WriteJSON(clientBrowserMessage{Type: "audio", Data: payload, CandidateID: *candidateID, Language: *language, CandidateStyle: *candidateStyle}); err != nil {
+	if err := conn.WriteJSON(clientBrowserMessage{SessionID: *sessionID, Type: "audio", Data: payload, CandidateID: *candidateID, Language: *language, CandidateStyle: *candidateStyle}); err != nil {
 		log.Fatal(err)
 	}
 	for {
@@ -66,6 +71,9 @@ func main() {
 			fmt.Printf("\nphase: %s <- %s\n", msg.Phase, msg.PhaseBefore)
 		} else if msg.Type == "style" {
 			fmt.Printf("\nstyle: %s [%s %s]\n", msg.ResponseStyle, msg.Language, msg.Phase)
+		} else if msg.Type == "interview_response" {
+			fmt.Printf("\nresponse (%s, %s): %s\n", msg.Style, msg.Status, msg.Response)
+			return
 		} else if msg.Type == "token" {
 			fmt.Printf("%s ", msg.Text)
 		} else if msg.Type == "end" {
