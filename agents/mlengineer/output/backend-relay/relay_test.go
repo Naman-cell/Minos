@@ -109,3 +109,15 @@ func TestFallbackWebSocketSendsFillerBeforeBinaryAudioSTT(t *testing.T) {
 		t.Fatalf("language=%q want hinglish", msg.Language)
 	}
 }
+
+func TestFillerVariesAcrossTurnsForSameSession(t *testing.T) {
+	relay := NewRelay(NewSTTClient(), &fakeModel{})
+	first := relay.fillerFor("session_filler_001", "candidate_filler_001", "hinglish")
+	second := relay.fillerFor("session_filler_001", "candidate_filler_001", "hinglish")
+	if first == "" || second == "" {
+		t.Fatalf("expected non-empty fillers: first=%q second=%q", first, second)
+	}
+	if first == second {
+		t.Fatalf("expected varied fillers for same session, got %q twice", first)
+	}
+}

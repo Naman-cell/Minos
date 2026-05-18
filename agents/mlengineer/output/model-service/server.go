@@ -121,7 +121,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/interviews/", s.handleInterviewByID)
 	mux.HandleFunc("/manual-test", s.handleManualTest)
 	mux.HandleFunc("/ws", s.handleWS)
-	return mux
+	return withCORS(mux)
 }
 
 func (s *Server) handleManualTest(w http.ResponseWriter, r *http.Request) {
@@ -162,11 +162,13 @@ func (s *Server) handleInterviews(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "brain C ledger start failed: " + err.Error()})
 			return
 		}
+		start := time.Now()
 		turn, err := s.brainC.InterviewTurn(r.Context(), s.newInterviewTurnRequest(session, "", normalizeLanguage(req.Language)))
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "brain C interview turn failed: " + err.Error()})
 			return
 		}
+		logInterviewTurnLatency("opening", session, "", normalizeLanguage(req.Language), start, turn)
 		turn.ResponseText = cleanInterviewResponse(turn.ResponseText, session.CandidateName)
 		s.applyInterviewTurn(session, turn)
 		session.AppendAssistant(turn.ResponseText)
@@ -224,10 +226,12 @@ func (s *Server) startInterview(ctx context.Context, session *CandidateSession) 
 	if err := s.brainC.LedgerStart(ctx, session.CandidateID); err != nil {
 		return StartInterviewResponse{}, err
 	}
+	start := time.Now()
 	turn, err := s.brainC.InterviewTurn(ctx, s.newInterviewTurnRequest(session, "", session.Language))
 	if err != nil {
 		return StartInterviewResponse{}, err
 	}
+	logInterviewTurnLatency("opening", session, "", session.Language, start, turn)
 	turn.ResponseText = cleanInterviewResponse(turn.ResponseText, session.CandidateName)
 	s.applyInterviewTurn(session, turn)
 	session.AppendAssistant(turn.ResponseText)
@@ -420,6 +424,7 @@ func (s *Server) handleTurn(ctx context.Context, conn *websocket.Conn, req Model
 }
 
 func (s *Server) handleInterviewTurn(ctx context.Context, conn *websocket.Conn, req ModelRequest) error {
+	receivedAt := time.Now()
 	req.Text = strings.TrimSpace(req.Text)
 	session := s.sessionForRequest(req)
 	s.startInterviewClock(session)
@@ -448,10 +453,12 @@ func (s *Server) handleInterviewTurn(ctx context.Context, conn *websocket.Conn, 
 	}
 	session.RollingSummary = summarizeMemories(memories)
 
+	turnStart := time.Now()
 	turn, err := s.brainC.InterviewTurn(ctx, s.newInterviewTurnRequest(session, req.Text, behavior.Language))
 	if err != nil {
 		return err
 	}
+	logInterviewTurnLatency("candidate_turn", session, req.Text, behavior.Language, turnStart, turn)
 	turn.ResponseText = cleanInterviewResponse(turn.ResponseText, session.CandidateName)
 	s.applyInterviewTurn(session, turn)
 	if err := s.brainA.StoreTurnWithLanguage(req.Context+"\n"+req.Text, turn.Language); err != nil {
@@ -462,9 +469,18 @@ func (s *Server) handleInterviewTurn(ctx context.Context, conn *websocket.Conn, 
 			return err
 		}
 	}
+	emitStart := time.Now()
 	if err := s.writeStyledResponse(ctx, conn, turn.ResponseText, turn.Language, turn.ResponseStyle, turn.Phase, session); err != nil {
 		return err
 	}
+	log.Printf("ws_emit_latency path=candidate_turn session_id=%s candidate_id=%s received_to_first_emit_ms=%d emit_ms=%d transcript_chars=%d language=%s",
+		session.SessionID,
+		session.CandidateID,
+		emitStart.Sub(receivedAt).Milliseconds(),
+		time.Since(emitStart).Milliseconds(),
+		len(req.Text),
+		turn.Language,
+	)
 	if session.timeRemaining(time.Now()) <= time.Minute {
 		session.ClosingPending = true
 	}
@@ -484,6 +500,20 @@ func (s *Server) handleInterviewTurn(ctx context.Context, conn *websocket.Conn, 
 		session.Ended = true
 	}
 	return nil
+}
+
+func logInterviewTurnLatency(path string, session *CandidateSession, transcript string, languageHint string, start time.Time, turn InterviewTurnResponse) {
+	log.Printf("interview_turn_latency path=%s session_id=%s candidate_id=%s phase=%s language=%s language_hint=%s transcript_chars=%d turn_ms=%d brainc_debug=%v",
+		path,
+		session.SessionID,
+		session.CandidateID,
+		turn.Phase,
+		turn.Language,
+		normalizeLanguageHint(languageHint),
+		len(transcript),
+		time.Since(start).Milliseconds(),
+		turn.DebugTimings,
+	)
 }
 
 func (s *Server) newInterviewTurnRequest(session *CandidateSession, transcript string, languageHint string) InterviewTurnRequest {
@@ -791,4 +821,17 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
