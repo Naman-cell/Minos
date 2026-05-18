@@ -1,10 +1,12 @@
 # Test Report: `/interview/turn` Migration
 
-Date: 2026-05-17
+Date: 2026-05-18
 
 ## Summary
 
 Local Go tests pass for the rebuilt model service and backend relay. The model service now defaults to `USE_INTERVIEW_TURN=true` and uses Brain C `POST /interview/turn` for the greeting and per-turn interviewer response.
+
+The latest rebuild consumes Brain C's new `session_should_end`, `repeat_prompt`, and `opening_template` fields. Empty STT transcripts are now treated as normal silence/too-short-audio turns and are forwarded to `/interview/turn`; they no longer end the session.
 
 Remote Brain C live validation is currently blocked: the configured ngrok URL returns `ERR_NGROK_8012`, meaning ngrok is reachable but its upstream service at `localhost:8000` is refusing the connection.
 
@@ -52,8 +54,13 @@ ERR_NGROK_8012: upstream web service at localhost:8000 refused the connection
 
 - Start interview calls Brain C `InterviewTurn` with `transcript:""` and returns that greeting in the existing `first_question` field for browser compatibility.
 - Start interview resets the Brain C ledger first, so reused candidate ids such as `manual_001` do not resume stale phase/topic state.
+- `InterviewTurnResponse` includes `session_should_end`, `repeat_prompt`, and `opening_template`.
+- Empty transcript turns render Brain C's `repeat_prompt:true` response, preserve `candidate_id`, and do not call `/analyze` or `/ledger/end`.
+- `/analyze` and `/ledger/end` are gated on `session_should_end:true` for Brain C-driven turns.
+- Candidate IDs are stable across model-service WebSocket reconnects when the same `session_id` is used.
 - WebSocket candidate turns in the new path do not emit legacy hardcoded `ack` frames.
 - Relay `STT_MODE=brainc` posts browser audio to Brain C `/transcribe`, not `/native-audio-chat`.
+- Relay accepts empty `/transcribe` output and forwards the empty transcript to the model service instead of treating it as an STT failure.
 - `/native-audio-chat` requires explicit `STT_MODE=native_audio` and is not used for production interviews.
 - Relay preserves `phase` and `phase_before` fields instead of emitting half-empty phase frames.
 - Relay emits optional `filler` frames before binary audio STT to mask latency; filler text is not sent to the model service or Brain C.

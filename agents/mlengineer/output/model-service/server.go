@@ -426,16 +426,6 @@ func (s *Server) handleInterviewTurn(ctx context.Context, conn *websocket.Conn, 
 	if session.Ended {
 		return s.writeCompletedResponse(ctx, conn, closingResponse(session), session.Language, "Friendly", session)
 	}
-	if session.ClosingPending || session.Expired(time.Now()) {
-		session.AppendUser(req.Text)
-		session.ClosingPending = false
-		session.Ended = true
-		if err := s.writeCompletedResponse(ctx, conn, closingResponse(session), session.Language, "Friendly", session); err != nil {
-			return err
-		}
-		_, _, err := s.finalizeInterview(ctx, session)
-		return err
-	}
 
 	behavior := s.brainB.Analyze(req.Text, req.Language)
 	if strings.TrimSpace(req.CandidateStyle) != "" {
@@ -468,20 +458,15 @@ func (s *Server) handleInterviewTurn(ctx context.Context, conn *websocket.Conn, 
 	if session.timeRemaining(time.Now()) <= time.Minute {
 		session.ClosingPending = true
 	}
-	if turn.Safety.Triggered {
+	if turn.SessionShouldEnd {
+		reason := "natural"
+		if turn.Safety.Triggered {
+			reason = "safety"
+		}
 		report, _, err := s.finalizeInterview(ctx, session)
 		if err == nil {
-			_ = conn.WriteJSON(StreamMessage{Type: "report", Report: report, ToneSummary: session.ToneSummary, EndedReason: "safety"})
+			_ = conn.WriteJSON(StreamMessage{Type: "report", Report: report, ToneSummary: session.ToneSummary, EndedReason: reason})
 		}
-		session.Ended = true
-		return nil
-	}
-	if turn.Phase == "wrap" && turn.Ledger.Ended {
-		report, _, err := s.finalizeInterview(ctx, session)
-		if err == nil {
-			_ = conn.WriteJSON(StreamMessage{Type: "report", Report: report, ToneSummary: session.ToneSummary, EndedReason: "natural"})
-		}
-		session.Ended = true
 	}
 	return nil
 }
@@ -519,9 +504,6 @@ func (s *Server) applyInterviewTurn(session *CandidateSession, turn InterviewTur
 	if turn.TopicHint != nil {
 		session.LastTopic = turn.TopicHint.Topic
 		session.LastLevel = turn.TopicHint.Level
-	}
-	if turn.Ledger.Ended {
-		session.Ended = true
 	}
 }
 

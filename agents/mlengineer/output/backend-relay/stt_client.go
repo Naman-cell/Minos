@@ -122,9 +122,6 @@ func (s *STTClient) transcribeWithBrainC(ctx context.Context, audio []byte, lang
 	} else {
 		transcript = strings.TrimSpace(string(raw))
 	}
-	if transcript == "" {
-		return "", fmt.Errorf("brain C transcribe returned empty transcript")
-	}
 	return transcript, nil
 }
 

@@ -23,6 +23,20 @@ func (f *fakeModel) Stream(ctx context.Context, sessionID, candidateID, text, co
 	return out, nil
 }
 
+type recordingModel struct {
+	texts []string
+}
+
+func (m *recordingModel) Stream(ctx context.Context, sessionID, candidateID, text, contextBlock, language, candidateStyle string) (<-chan StreamMessage, error) {
+	m.texts = append(m.texts, text)
+	out := make(chan StreamMessage, 3)
+	out <- StreamMessage{Type: "style", ResponseStyle: "Friendly", Language: "en", Phase: "interview"}
+	out <- StreamMessage{Type: "token", Text: "Again?", State: "speaking", Language: "en"}
+	out <- StreamMessage{Type: "end", State: "listening", Language: "en"}
+	close(out)
+	return out, nil
+}
+
 func TestFallbackWebSocketAggregatesModelStream(t *testing.T) {
 	relay := NewRelay(NewSTTClient(), &fakeModel{})
 	server := httptest.NewServer(relay.Routes())
@@ -107,5 +121,62 @@ func TestFallbackWebSocketSendsFillerBeforeBinaryAudioSTT(t *testing.T) {
 	}
 	if msg.Language != "hinglish" {
 		t.Fatalf("language=%q want hinglish", msg.Language)
+	}
+}
+
+func TestFallbackWebSocketForwardsEmptyTranscriptToModel(t *testing.T) {
+	sttServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/transcribe" {
+			t.Fatalf("path=%q want /transcribe", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"transcript":""}`))
+	}))
+	defer sttServer.Close()
+
+	model := &recordingModel{}
+	relay := NewRelay(&STTClient{
+		mode:      "brainc",
+		brainURL:  sttServer.URL,
+		client:    sttServer.Client(),
+		mediaName: "candidate.webm",
+		mediaType: "audio/webm",
+	}, model)
+	server := httptest.NewServer(relay.Routes())
+	defer server.Close()
+
+	url := "ws" + server.URL[len("http"):] + "/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	payload := base64.StdEncoding.EncodeToString([]byte{1, 2, 3, 4})
+	if err := conn.WriteJSON(BrowserMessage{Type: "audio", Data: payload, SessionID: "repeat_session_001", CandidateID: "repeat_candidate_001", Language: "en"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var filler StreamMessage
+	if err := conn.ReadJSON(&filler); err != nil {
+		t.Fatal(err)
+	}
+	if filler.Type != "filler" {
+		t.Fatalf("first type=%q want filler", filler.Type)
+	}
+	var response StreamMessage
+	if err := conn.ReadJSON(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Type != "interview_response" {
+		t.Fatalf("response type=%q want interview_response", response.Type)
+	}
+	if len(model.texts) != 1 {
+		t.Fatalf("model texts=%d want 1", len(model.texts))
+	}
+	if model.texts[0] != "" {
+		t.Fatalf("model text=%q want empty", model.texts[0])
 	}
 }

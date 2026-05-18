@@ -105,16 +105,19 @@ type InterviewTurnResponse struct {
 	ResponseText     string         `json:"response_text"`
 	Language         string         `json:"language"`
 	Phase            string         `json:"phase"`
-	PhaseBefore      string         `json:"phase_before"`
+	PhaseBefore      string         `json:"phase_before,omitempty"`
 	PhaseChanged     bool           `json:"phase_changed"`
-	TurnCountInPhase int            `json:"turn_count_in_phase"`
+	TurnCountInPhase int            `json:"turn_count_in_phase,omitempty"`
 	Classification   Classification `json:"classification"`
 	CandidateStyle   string         `json:"candidate_style,omitempty"`
 	ResponseStyle    string         `json:"response_style,omitempty"`
-	SoftenerUsed     *string        `json:"softener_used"`
-	TopicHint        *TopicHint     `json:"topic_hint"`
+	SoftenerUsed     *string        `json:"softener_used,omitempty"`
+	TopicHint        *TopicHint     `json:"topic_hint,omitempty"`
 	Safety           SafetyPayload  `json:"safety"`
 	Ledger           LedgerSummary  `json:"ledger"`
+	SessionShouldEnd bool           `json:"session_should_end"`
+	RepeatPrompt     bool           `json:"repeat_prompt,omitempty"`
+	OpeningTemplate  bool           `json:"opening_template,omitempty"`
 }
 
 type ToneSummary struct {

@@ -47,6 +47,31 @@ func TestBrainCSTTUsesTranscribeEndpoint(t *testing.T) {
 	}
 }
 
+func TestBrainCSTTAllowsEmptyTranscript(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/transcribe" {
+			t.Fatalf("path=%q want /transcribe", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"transcript": ""})
+	}))
+	defer server.Close()
+
+	client := &STTClient{
+		mode:      "brainc",
+		brainURL:  server.URL,
+		client:    server.Client(),
+		mediaName: "candidate.webm",
+		mediaType: "audio/webm",
+	}
+	got, err := client.Transcribe(context.Background(), []byte{1, 2, 3}, "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Fatalf("transcript=%q want empty", got)
+	}
+}
+
 func TestNativeAudioRequiresExplicitMode(t *testing.T) {
 	var gotPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

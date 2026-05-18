@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
@@ -176,6 +177,135 @@ func TestCleanInterviewResponseRemovesWrapperAndPlaceholder(t *testing.T) {
 	}
 }
 
+func TestEmptyTranscriptRepeatPromptDoesNotEndSession(t *testing.T) {
+	t.Setenv("USE_INTERVIEW_TURN", "true")
+	brainC := &scriptedBrainC{
+		MockBrainC: NewMockBrainC(),
+		turnResp: InterviewTurnResponse{
+			ResponseText:     "Sorry, I didn't catch that. Could you say that again?",
+			Language:         "en",
+			Phase:            "interview",
+			ResponseStyle:    "Friendly",
+			RepeatPrompt:     true,
+			SessionShouldEnd: false,
+			Ledger:           LedgerSummary{CandidateID: "empty_repeat_001", Phase: "interview"},
+		},
+	}
+	server := NewServer(mustBrainA(t), NewBrainB(), brainC, NewStateMachine())
+	session := server.sessions.Start(StartInterviewRequest{
+		CandidateID:    "empty_repeat_001",
+		CandidateName:  "Nirav",
+		JobDescription: "Senior backend role",
+		Seniority:      "senior",
+	})
+	initialID := session.CandidateID
+	httpServer := httptest.NewServer(server.Routes())
+	defer httpServer.Close()
+
+	conn := dialModelWS(t, httpServer.URL)
+	defer conn.Close()
+	if err := conn.WriteJSON(ModelRequest{SessionID: session.SessionID, CandidateID: session.CandidateID, Text: "", Language: "en"}); err != nil {
+		t.Fatal(err)
+	}
+	messages := readUntilEnd(t, conn)
+	if len(messages) == 0 {
+		t.Fatal("expected websocket response")
+	}
+	if session.Ended {
+		t.Fatal("session must not end on empty transcript repeat prompt")
+	}
+	if session.CandidateID != initialID {
+		t.Fatalf("candidate_id changed: %q -> %q", initialID, session.CandidateID)
+	}
+	if brainC.analyzeCalls != 0 {
+		t.Fatalf("analyze calls=%d want 0", brainC.analyzeCalls)
+	}
+	if brainC.endLedgerCalls != 0 {
+		t.Fatalf("ledger end calls=%d want 0", brainC.endLedgerCalls)
+	}
+	if len(brainC.turnRequests) != 1 {
+		t.Fatalf("turn requests=%d want 1", len(brainC.turnRequests))
+	}
+	if brainC.turnRequests[0].Transcript != "" {
+		t.Fatalf("turn transcript=%q want empty", brainC.turnRequests[0].Transcript)
+	}
+}
+
+func TestSessionShouldEndTriggersAnalyzeAndLedgerEnd(t *testing.T) {
+	t.Setenv("USE_INTERVIEW_TURN", "true")
+	brainC := &scriptedBrainC{
+		MockBrainC: NewMockBrainC(),
+		turnResp: InterviewTurnResponse{
+			ResponseText:     "Thanks for your time, that wraps things up.",
+			Language:         "en",
+			Phase:            "wrap",
+			ResponseStyle:    "Friendly",
+			SessionShouldEnd: true,
+			Ledger:           LedgerSummary{CandidateID: "should_end_001", Phase: "wrap", Ended: true},
+		},
+	}
+	server := NewServer(mustBrainA(t), NewBrainB(), brainC, NewStateMachine())
+	session := server.sessions.Start(StartInterviewRequest{CandidateID: "should_end_001", JobDescription: "Backend role"})
+	httpServer := httptest.NewServer(server.Routes())
+	defer httpServer.Close()
+
+	conn := dialModelWS(t, httpServer.URL)
+	defer conn.Close()
+	if err := conn.WriteJSON(ModelRequest{SessionID: session.SessionID, CandidateID: session.CandidateID, Text: "Sounds good.", Language: "en"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = readUntilReport(t, conn)
+	if !session.Ended {
+		t.Fatal("session should be ended after session_should_end")
+	}
+	if brainC.analyzeCalls != 1 {
+		t.Fatalf("analyze calls=%d want 1", brainC.analyzeCalls)
+	}
+	if brainC.endLedgerCalls != 1 {
+		t.Fatalf("ledger end calls=%d want 1", brainC.endLedgerCalls)
+	}
+}
+
+func TestCandidateIDStableAcrossWebSocketReconnect(t *testing.T) {
+	t.Setenv("USE_INTERVIEW_TURN", "true")
+	brainC := &scriptedBrainC{
+		MockBrainC: NewMockBrainC(),
+		turnResp: InterviewTurnResponse{
+			ResponseText:     "That context helps. What metric did you use?",
+			Language:         "en",
+			Phase:            "interview",
+			ResponseStyle:    "Friendly",
+			SessionShouldEnd: false,
+			Ledger:           LedgerSummary{CandidateID: "stable_reconnect_001", Phase: "interview"},
+		},
+	}
+	server := NewServer(mustBrainA(t), NewBrainB(), brainC, NewStateMachine())
+	session := server.sessions.Start(StartInterviewRequest{CandidateID: "stable_reconnect_001", JobDescription: "Backend role"})
+	httpServer := httptest.NewServer(server.Routes())
+	defer httpServer.Close()
+
+	for i := 0; i < 2; i++ {
+		conn := dialModelWS(t, httpServer.URL)
+		if err := conn.WriteJSON(ModelRequest{SessionID: session.SessionID, Text: "I measured p95 latency.", Language: "en"}); err != nil {
+			t.Fatal(err)
+		}
+		_ = readUntilEnd(t, conn)
+		_ = conn.Close()
+	}
+
+	if len(brainC.turnRequests) != 2 {
+		t.Fatalf("turn requests=%d want 2", len(brainC.turnRequests))
+	}
+	for i, req := range brainC.turnRequests {
+		if req.CandidateID != "stable_reconnect_001" {
+			t.Fatalf("turn %d candidate_id=%q want stable_reconnect_001", i, req.CandidateID)
+		}
+	}
+	if session.CandidateID != "stable_reconnect_001" {
+		t.Fatalf("session candidate_id=%q", session.CandidateID)
+	}
+}
+
 func createSession(t *testing.T, baseURL, candidateID string) string {
 	t.Helper()
 	body := &bytes.Buffer{}
@@ -232,4 +362,80 @@ func assertNotContains(t *testing.T, text, forbidden string) {
 	if strings.Contains(strings.ToLower(text), strings.ToLower(forbidden)) {
 		t.Fatalf("%q unexpectedly contains %q", text, forbidden)
 	}
+}
+
+func dialModelWS(t *testing.T, baseURL string) *websocket.Conn {
+	t.Helper()
+	url := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	return conn
+}
+
+func readUntilEnd(t *testing.T, conn *websocket.Conn) []StreamMessage {
+	t.Helper()
+	var messages []StreamMessage
+	for {
+		var msg StreamMessage
+		if err := conn.ReadJSON(&msg); err != nil {
+			t.Fatal(err)
+		}
+		messages = append(messages, msg)
+		if msg.Type == "end" {
+			return messages
+		}
+	}
+}
+
+func readUntilReport(t *testing.T, conn *websocket.Conn) []StreamMessage {
+	t.Helper()
+	var messages []StreamMessage
+	for {
+		var msg StreamMessage
+		if err := conn.ReadJSON(&msg); err != nil {
+			t.Fatal(err)
+		}
+		messages = append(messages, msg)
+		if msg.Type == "report" {
+			return messages
+		}
+	}
+}
+
+type scriptedBrainC struct {
+	*MockBrainC
+	turnResp       InterviewTurnResponse
+	turnRequests   []InterviewTurnRequest
+	analyzeCalls   int
+	endLedgerCalls int
+}
+
+func (b *scriptedBrainC) InterviewTurn(ctx context.Context, req InterviewTurnRequest) (InterviewTurnResponse, error) {
+	b.turnRequests = append(b.turnRequests, req)
+	resp := b.turnResp
+	if resp.Language == "" {
+		resp.Language = "en"
+	}
+	if resp.ResponseStyle == "" {
+		resp.ResponseStyle = "Friendly"
+	}
+	if resp.Ledger.CandidateID == "" {
+		resp.Ledger.CandidateID = req.CandidateID
+	}
+	return resp, nil
+}
+
+func (b *scriptedBrainC) Analyze(ctx context.Context, transcript, candidateID string) (map[string]any, error) {
+	b.analyzeCalls++
+	return b.MockBrainC.Analyze(ctx, transcript, candidateID)
+}
+
+func (b *scriptedBrainC) LedgerEnd(ctx context.Context, candidateID string) error {
+	b.endLedgerCalls++
+	return b.MockBrainC.LedgerEnd(ctx, candidateID)
 }

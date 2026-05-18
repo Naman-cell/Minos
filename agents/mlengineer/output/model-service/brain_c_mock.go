@@ -52,6 +52,8 @@ func (b *MockBrainC) InterviewTurn(ctx context.Context, req InterviewTurnRequest
 		language = "en"
 	}
 	category := "substantive"
+	repeatPrompt := false
+	openingTemplate := false
 	if strings.TrimSpace(req.Transcript) == "" {
 		category = "empty"
 	}
@@ -66,6 +68,17 @@ func (b *MockBrainC) InterviewTurn(ctx context.Context, req InterviewTurnRequest
 		"Shamil hone ke liye dhanyavaad. Technical baaton se pehle, aapka din kaisa chal raha hai?",
 		"Thanks for joining. Technical baaton se pehle, aapka day kaisa chal raha hai?",
 	)
+	if req.Transcript == "" && strings.TrimSpace(req.JobDescription) != "" {
+		openingTemplate = true
+	}
+	if req.Transcript == "" && strings.TrimSpace(req.JobDescription) == "" {
+		repeatPrompt = true
+		response = localized(language,
+			"Sorry, I didn't catch that. Could you say that again?",
+			"Maaf kijiye, main woh catch nahi kar paaya. Kya aap dobara bol sakte hain?",
+			"Sorry, main woh catch nahi kar paaya. Kya aap dobara bol sakte ho?",
+		)
+	}
 	if req.Transcript != "" {
 		response = localized(language,
 			"That context helps. What tradeoff did you make, and which metric told you it worked?",
@@ -94,8 +107,11 @@ func (b *MockBrainC) InterviewTurn(ctx context.Context, req InterviewTurnRequest
 			Language:   language,
 			Confidence: 1,
 		},
-		CandidateStyle: candidateStyle,
-		ResponseStyle:  responseStyle,
+		CandidateStyle:   candidateStyle,
+		ResponseStyle:    responseStyle,
+		SessionShouldEnd: category == "crisis",
+		RepeatPrompt:     repeatPrompt,
+		OpeningTemplate:  openingTemplate,
 		Safety: SafetyPayload{
 			Triggered:         category == "crisis",
 			Severity:          mapBool(category == "crisis", "critical", ""),
