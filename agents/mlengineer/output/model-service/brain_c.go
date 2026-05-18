@@ -115,7 +115,6 @@ type InterviewTurnResponse struct {
 	TopicHint        *TopicHint     `json:"topic_hint"`
 	Safety           SafetyPayload  `json:"safety"`
 	Ledger           LedgerSummary  `json:"ledger"`
-	DebugTimings     map[string]any `json:"debug_timings,omitempty"`
 }
 
 type ToneSummary struct {

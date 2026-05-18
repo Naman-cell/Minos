@@ -4,10 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -43,13 +41,11 @@ type StreamMessage struct {
 }
 
 type Relay struct {
-	stt      *STTClient
-	model    ModelStreamer
-	prosody  ProsodyDetector
-	signals  *SignalStore
-	fillers  map[string]int
-	fillerMu sync.Mutex
-	upgrade  websocket.Upgrader
+	stt     *STTClient
+	model   ModelStreamer
+	prosody ProsodyDetector
+	signals *SignalStore
+	upgrade websocket.Upgrader
 }
 
 type ModelStreamer interface {
@@ -62,7 +58,6 @@ func NewRelay(stt *STTClient, model ModelStreamer) *Relay {
 		model:   model,
 		prosody: FallbackProsodyDetector{},
 		signals: &SignalStore{},
-		fillers: make(map[string]int),
 		upgrade: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
 }
@@ -173,61 +168,32 @@ func (r *Relay) relayBrowserPayload(ctx context.Context, raw []byte, send func(S
 }
 
 func (r *Relay) relayAudio(ctx context.Context, audio []byte, sessionID, candidateID, language string, send func(StreamMessage) error) error {
-	receivedAt := time.Now()
 	if !isTextBypass(audio) {
-		if err := send(StreamMessage{Type: "filler", Text: r.fillerFor(sessionID, candidateID, language), State: "thinking", Language: normalizeRelayLanguage(language)}); err != nil {
+		if err := send(StreamMessage{Type: "filler", Text: fillerFor(candidateID, language), State: "thinking", Language: normalizeRelayLanguage(language)}); err != nil {
 			return err
 		}
 	}
-	type styleResult struct {
-		style string
-		err   error
-	}
-	styleCh := make(chan styleResult, 1)
-	go func() {
-		style, err := r.prosody.DetectStyle(ctx, audio)
-		styleCh <- styleResult{style: style, err: err}
-	}()
-	sttStart := time.Now()
 	text, err := r.stt.Transcribe(ctx, audio, language)
 	if err != nil {
 		return err
 	}
-	sttDone := time.Now()
-	style := "Default"
-	select {
-	case result := <-styleCh:
-		if result.err == nil && strings.TrimSpace(result.style) != "" {
-			style = result.style
-		}
-	case <-ctx.Done():
-		return ctx.Err()
+	style, err := r.prosody.DetectStyle(ctx, audio)
+	if err != nil {
+		style = "Default"
 	}
-	modelStart := time.Now()
-	err = r.streamTranscript(ctx, sessionID, candidateID, text, language, styleOrDefault(style), send)
-	log.Printf("relay_turn_latency session_id=%s candidate_id=%s language_hint=%s audio_bytes=%d stt_ms=%d model_ms=%d total_ms=%d transcript_chars=%d",
-		sessionID,
-		candidateID,
-		normalizeRelayLanguage(language),
-		len(audio),
-		sttDone.Sub(sttStart).Milliseconds(),
-		time.Since(modelStart).Milliseconds(),
-		time.Since(receivedAt).Milliseconds(),
-		len(text),
-	)
-	return err
+	return r.streamTranscript(ctx, sessionID, candidateID, text, language, styleOrDefault(style), send)
 }
 
 func isTextBypass(audio []byte) bool {
 	return strings.HasPrefix(strings.TrimSpace(string(audio)), "text:")
 }
 
-func (r *Relay) fillerFor(sessionID, candidateID, language string) string {
+func fillerFor(candidateID, language string) string {
 	phrases := map[string][]string{
 		"en": {
 			"Hmm, interesting, let me think about that.",
 			"Got it, give me a moment to process that.",
-			"I am taking that in.",
+			"Okay, I am taking that in.",
 			"That is useful context, one moment.",
 		},
 		"hi": {
@@ -239,26 +205,19 @@ func (r *Relay) fillerFor(sessionID, candidateID, language string) string {
 		"hinglish": {
 			"Got it, yeh useful context hai.",
 			"Hmm, interesting, ek moment.",
-			"Main isko process kar raha hoon.",
+			"Okay, main isko process kar raha hoon.",
 			"Samajh gaya, let me think about that.",
 		},
 	}
 	lang := normalizeRelayLanguage(language)
 	options := phrases[lang]
+	idx := 0
+	for _, r := range candidateID {
+		idx += int(r)
+	}
 	if len(options) == 0 {
 		return ""
 	}
-	key := strings.TrimSpace(sessionID)
-	if key == "" {
-		key = strings.TrimSpace(candidateID)
-	}
-	if key == "" {
-		key = "default"
-	}
-	r.fillerMu.Lock()
-	idx := r.fillers[key]
-	r.fillers[key] = idx + 1
-	r.fillerMu.Unlock()
 	return options[idx%len(options)]
 }
 

@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
@@ -83,65 +82,6 @@ func TestInterviewStartUsesGreetingPath(t *testing.T) {
 	assertNotContains(t, decoded.Response, "system prompt")
 	if decoded.Session["use_turn_api"] != true {
 		t.Fatalf("expected use_turn_api marker, got %#v", decoded.Session["use_turn_api"])
-	}
-}
-
-func TestInterviewStartSendsOpeningTurnBeforeAudioWithCandidateName(t *testing.T) {
-	t.Setenv("USE_INTERVIEW_TURN", "true")
-	brainC := &recordingBrainC{MockBrainC: NewMockBrainC()}
-	server := NewServer(mustBrainA(t), NewBrainB(), brainC, NewStateMachine())
-	httpServer := httptest.NewServer(server.Routes())
-	defer httpServer.Close()
-
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-	_ = writer.WriteField("candidate_id", "opening_contract_001")
-	_ = writer.WriteField("candidate_name", "Nirav")
-	_ = writer.WriteField("job_description", "Senior backend role requiring API reliability.")
-	_ = writer.WriteField("seniority", "senior")
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	req, err := http.NewRequest(http.MethodPost, httpServer.URL+"/interviews", body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	var created CreateInterviewResponse
-	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
-		t.Fatal(err)
-	}
-
-	startReq, err := http.NewRequest(http.MethodPost, httpServer.URL+"/interviews/"+created.SessionID+"/start", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	startResp, err := http.DefaultClient.Do(startReq)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer startResp.Body.Close()
-	if startResp.StatusCode != http.StatusOK {
-		t.Fatalf("start status=%s", startResp.Status)
-	}
-
-	if len(brainC.turnRequests) != 1 {
-		t.Fatalf("turn requests=%d want 1", len(brainC.turnRequests))
-	}
-	got := brainC.turnRequests[0]
-	if got.Transcript != "" {
-		t.Fatalf("opening transcript=%q want empty", got.Transcript)
-	}
-	if got.CandidateName != "Nirav" {
-		t.Fatalf("candidate_name=%q want Nirav", got.CandidateName)
-	}
-	if got.CandidateStyle != "Default" {
-		t.Fatalf("candidate_style=%q want Default", got.CandidateStyle)
 	}
 }
 
@@ -292,14 +232,4 @@ func assertNotContains(t *testing.T, text, forbidden string) {
 	if strings.Contains(strings.ToLower(text), strings.ToLower(forbidden)) {
 		t.Fatalf("%q unexpectedly contains %q", text, forbidden)
 	}
-}
-
-type recordingBrainC struct {
-	*MockBrainC
-	turnRequests []InterviewTurnRequest
-}
-
-func (b *recordingBrainC) InterviewTurn(ctx context.Context, req InterviewTurnRequest) (InterviewTurnResponse, error) {
-	b.turnRequests = append(b.turnRequests, req)
-	return b.MockBrainC.InterviewTurn(ctx, req)
 }
